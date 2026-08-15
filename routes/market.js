@@ -40,7 +40,10 @@ async function fetchOHLCFromProvider(symbol, timeframe, limit) {
   const r = await fetch(url, { timeout: 8000 });
   if (!r.ok) return { status: 'UNAVAILABLE', error: `provider-http-${r.status}` };
   const data = await r.json();
-  if (!data || !Array.isArray(data.values)) return { status: 'UNAVAILABLE', error: 'provider-empty-response' };
+  // TwelveData گاهی خطا را با HTTP 200 برمی‌گرداند (مثلاً {"status":"error","message":"..."})؛
+  // پیام واقعی را برای دیباگ راحت‌تر برمی‌گردانیم، نه فقط یک خطای عمومی.
+  if (data && data.status === 'error') return { status: 'UNAVAILABLE', error: `twelvedata: ${data.message || data.code || 'unknown-error'}` };
+  if (!data || !Array.isArray(data.values) || data.values.length === 0) return { status: 'UNAVAILABLE', error: 'provider-empty-or-no-data' };
 
   const bars = data.values
     .map((v) => ({
