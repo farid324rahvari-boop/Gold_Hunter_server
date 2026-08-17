@@ -17,16 +17,25 @@ async function fetchQuoteFromProvider(symbol) {
   const apiKey = process.env.TWELVEDATA_API_KEY;
   if (!apiKey) return { status: 'UNAVAILABLE', error: 'no-api-key-configured' };
 
-  const url = `https://api.twelvedata.com/price?symbol=${encodeURIComponent(symbol)}&apikey=${apiKey}`;
+  // از اندپوینت /quote (نه /price) استفاده می‌کنیم چون علاوه بر قیمت، تغییر روزانه،
+  // درصد تغییر، بیشترین/کمترین امروز را هم می‌دهد — دقیقاً چیزی که داشبورد نیاز دارد.
+  const url = `https://api.twelvedata.com/quote?symbol=${encodeURIComponent(symbol)}&apikey=${apiKey}`;
   const r = await fetch(url, { timeout: 8000 });
   if (!r.ok) return { status: 'UNAVAILABLE', error: `provider-http-${r.status}` };
   const data = await r.json();
-  if (!data || !data.price) return { status: 'UNAVAILABLE', error: 'provider-empty-response' };
+  if (data && data.status === 'error') return { status: 'UNAVAILABLE', error: `twelvedata: ${data.message || data.code || 'unknown-error'}` };
+  if (!data || !data.close) return { status: 'UNAVAILABLE', error: 'provider-empty-response' };
+
+  const price = parseFloat(data.close);
+  const change = data.change != null ? parseFloat(data.change) : 0;
+  const changePercent = data.percent_change != null ? parseFloat(data.percent_change) : 0;
+  const high = data.high != null ? parseFloat(data.high) : price;
+  const low = data.low != null ? parseFloat(data.low) : price;
 
   return {
     status: 'LIVE',
     symbol,
-    price: parseFloat(data.price),
+    price, change, changePercent, high, low,
     fetchedAt: new Date().toISOString()
   };
 }
