@@ -42,7 +42,7 @@ router.get('/', async (req, res) => {
     const today = new Date();
     const from = new Date(today.getTime() - 7 * 86400000).toISOString().slice(0, 10);
     const to = new Date(today.getTime() + 14 * 86400000).toISOString().slice(0, 10);
-    const url = `https://financialmodelingprep.com/api/v3/economic_calendar?from=${from}&to=${to}&apikey=${apiKey}`;
+    const url = `https://financialmodelingprep.com/stable/economic-calendar?from=${from}&to=${to}&apikey=${apiKey}`;
     const r = await fetch(url, { timeout: 8000 });
     if (!r.ok) return res.json({ status: 'UNAVAILABLE', error: `provider-http-${r.status}`, events: [] });
     const data = await r.json();
@@ -78,7 +78,7 @@ router.get('/', async (req, res) => {
 
     res.json({ status: 'LIVE', events, hoursToNextHighImpact });
   } catch (e) {
-    res.json({ status: 'UNAVAILABLE', error: 'proxy-exception' });
+    res.json({ status: 'UNAVAILABLE', error: 'proxy-exception', events: [] });
   }
 });
 
