@@ -1,13 +1,17 @@
-// /api/calendar — تقویم اقتصادی واقعی از Financial Modeling Prep (رایگان، ۲۵۰ درخواست در روز)
-// کلید رایگان: financialmodelingprep.com/developer/docs/pricing-plans → Get your Free API Key
+// /api/calendar — داده‌های اقتصادی واقعی از Alpha Vantage (رایگان، بدون کارت بانکی)
+// کلید رایگان: alphavantage.co/support/#api-key
 // کلید را در .env با نام ECONOMIC_CALENDAR_API_KEY قرار بده.
-// (توجه: Finnhub تقویم اقتصادی را فقط در پلن پولی می‌دهد؛ برای همین از FMP استفاده می‌کنیم.)
+//
+// توجه مهم: بر خلاف تلاش‌های قبلی (Finnhub/FMP که تقویم اقتصادی را فقط در پلن پولی می‌دهند)،
+// Alpha Vantage به‌جای «تقویم رویدادهای آینده با پیش‌بینی»، آخرین مقادیر واقعی منتشرشده را می‌دهد.
+// یعنی ستون «پیش‌بینی» همیشه — خواهد بود (چون این داده اصلاً در این API وجود ندارد)،
+// اما ستون «واقعی» و «قبلی» واقعی و زنده است — که برای موتور نتیجه‌گیری فاندامنتال کافی است.
+// محدودیت شناخته‌شده: سقف رایگان این سرویس پایین است (توصیه: در طول روز زیاد رفرش نکنید).
 
 const express = require('express');
 const fetch = require('node-fetch');
 const router = express.Router();
 
-// تبدیل تاریخ میلادی به شمسی (الگوریتم استاندارد، بدون نیاز به کتابخانه خارجی)
 function toJalali(gy, gm, gd) {
   const g_d_m = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
   let jy = gy <= 1600 ? 0 : 979;
@@ -25,58 +29,49 @@ function toJalali(gy, gm, gd) {
   const toFa = (n) => String(n).replace(/[0-9]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'[d]);
   return `${toFa(jy)}/${toFa(String(jm).padStart(2, '0'))}/${toFa(String(jd).padStart(2, '0'))}`;
 }
+function jalaliFromStr(dateStr) {
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return '—';
+  return toJalali(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate());
+}
 
-function mapImpact(impact) {
-  const s = String(impact || '').toLowerCase();
-  if (s === 'high') return 'high';
-  if (s === 'medium') return 'medium';
-  return 'low';
+const INDICATORS = [
+  { fn: 'CPI', label: 'CPI آمریکا (ماهانه)', imp: 'high', interval: 'monthly' },
+  { fn: 'UNEMPLOYMENT', label: 'نرخ بیکاری آمریکا', imp: 'high', interval: null },
+  { fn: 'NONFARM_PAYROLL', label: 'اشتغال غیرکشاورزی (NFP)', imp: 'high', interval: null },
+  { fn: 'FEDERAL_FUNDS_RATE', label: 'نرخ بهره فدرال رزرو', imp: 'high', interval: 'monthly' },
+  { fn: 'INFLATION', label: 'نرخ تورم سالانه آمریکا', imp: 'medium', interval: null }
+];
+
+async function fetchIndicator(ind, apiKey) {
+  const intervalParam = ind.interval ? `&interval=${ind.interval}` : '';
+  const url = `https://www.alphavantage.co/query?function=${ind.fn}${intervalParam}&apikey=${apiKey}`;
+  const r = await fetch(url, { timeout: 8000 });
+  if (!r.ok) return null;
+  const json = await r.json();
+  if (json.Note || json.Information || json['Error Message']) return null; // Rate limit یا خطا
+  const series = json.data;
+  if (!Array.isArray(series) || series.length < 2) return null;
+  return {
+    t: ind.label, imp: ind.imp,
+    d: jalaliFromStr(series[0].date),
+    time: '—',
+    p: series[1].value != null ? String(series[1].value) : '—',
+    f: '—', // Alpha Vantage پیش‌بینی نمی‌دهد — فقط داده واقعی منتشرشده
+    a: series[0].value != null ? String(series[0].value) : '—'
+  };
 }
 
 router.get('/', async (req, res) => {
-  const apiKey = process.env.ECONOMIC_CALENDAR_API_KEY;
-  if (!apiKey) {
-    return res.json({ status: 'UNAVAILABLE', error: 'no-api-key-configured', events: [] });
-  }
+  const apiKey = process.env.ALPHA_VANTAGE_API_KEY;
+  if (!apiKey) return res.json({ status: 'UNAVAILABLE', error: 'no-api-key-configured', events: [] });
   try {
-    const today = new Date();
-    const from = new Date(today.getTime() - 7 * 86400000).toISOString().slice(0, 10);
-    const to = new Date(today.getTime() + 14 * 86400000).toISOString().slice(0, 10);
-    const url = `https://financialmodelingprep.com/stable/economic-calendar?from=${from}&to=${to}&apikey=${apiKey}`;
-    const r = await fetch(url, { timeout: 8000 });
-    if (!r.ok) return res.json({ status: 'UNAVAILABLE', error: `provider-http-${r.status}`, events: [] });
-    const data = await r.json();
-    if (!Array.isArray(data)) {
-      const msg = data && (data['Error Message'] || data.message);
-      return res.json({ status: 'UNAVAILABLE', error: msg || 'provider-empty-response', events: [] });
-    }
-    if (!data.length) return res.json({ status: 'UNAVAILABLE', error: 'no-events-returned', events: [] });
+    const results = await Promise.all(INDICATORS.map((ind) => fetchIndicator(ind, apiKey).catch(() => null)));
+    const events = results.filter((e) => e !== null);
+    if (!events.length) return res.json({ status: 'UNAVAILABLE', error: 'provider-empty-or-rate-limited', events: [] });
 
-    // فقط رویدادهای آمریکا با اهمیت متوسط/بالا (چون مؤثرترین‌ها روی طلا هستند)
-    const filtered = data.filter((e) => (e.country === 'US' || e.country === 'USD') && mapImpact(e.impact) !== 'low');
-
-    const events = filtered.slice(0, 30).map((e) => {
-      const dt = new Date(e.date);
-      const isValidDate = !isNaN(dt.getTime());
-      return {
-        t: e.event || 'رویداد اقتصادی',
-        d: isValidDate ? toJalali(dt.getUTCFullYear(), dt.getUTCMonth() + 1, dt.getUTCDate()) : '—',
-        time: isValidDate ? dt.toISOString().slice(11, 16) : '—',
-        imp: mapImpact(e.impact),
-        p: e.previous != null ? String(e.previous) : '—',
-        f: e.estimate != null ? String(e.estimate) : '—',
-        a: e.actual != null ? String(e.actual) : '—'
-      };
-    });
-
-    const now = Date.now();
-    const upcoming = filtered
-      .map((e) => new Date(e.date).getTime())
-      .filter((t) => !isNaN(t) && t > now)
-      .sort((a, b) => a - b);
-    const hoursToNextHighImpact = upcoming.length ? Math.round(((upcoming[0] - now) / 3600000) * 10) / 10 : null;
-
-    res.json({ status: 'LIVE', events, hoursToNextHighImpact });
+    // این سرویس تاریخ رویداد آینده نمی‌دهد؛ پس محاسبه «ساعت تا خبر بعدی» ممکن نیست — صادقانه null
+    res.json({ status: 'LIVE', events, hoursToNextHighImpact: null });
   } catch (e) {
     res.json({ status: 'UNAVAILABLE', error: 'proxy-exception', events: [] });
   }
