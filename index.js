@@ -13,12 +13,19 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 
-const marketRoutes = require('./routes/market');
-const calendarRoutes = require('./routes/calendar');
-const aiRoutes = require('./routes/ai');
-const alertsRoutes = require('./routes/alerts');
-const fundamentalsRoutes = require('./routes/fundamentals');
-const newsRoutes = require('./routes/news');
+// بارگذاری امن هر روت — اگر یک فایل روت گم یا خراب باشد (مثلاً هنوز آپلود نشده)،
+// فقط همان بخش غیرفعال می‌شود، نه کل سرور. این از کرش کامل سرور (که همه‌چیز از جمله
+// بخش‌های سالم را هم از کار می‌انداخت) جلوگیری می‌کند.
+function safeRequireRoute(path, mountPath, app) {
+  try {
+    const router = require(path);
+    app.use(mountPath, router);
+    console.log(`[gold-hunter-proxy] route loaded: ${mountPath}`);
+  } catch (e) {
+    console.error(`[gold-hunter-proxy] failed to load route ${mountPath} (${path}):`, e.message);
+    app.use(mountPath, (req, res) => res.json({ status: 'UNAVAILABLE', error: `route-not-loaded: ${e.message}` }));
+  }
+}
 
 const app = express();
 app.use(cors());
@@ -28,12 +35,12 @@ app.get('/api/health', (req, res) => {
   res.json({ ok: true, service: 'gold-hunter-proxy', time: new Date().toISOString() });
 });
 
-app.use('/api/market', marketRoutes);
-app.use('/api/calendar', calendarRoutes);
-app.use('/api/ai', aiRoutes);
-app.use('/api/alerts', alertsRoutes);
-app.use('/api/fundamentals', fundamentalsRoutes);
-app.use('/api/news', newsRoutes);
+safeRequireRoute('./routes/market', '/api/market', app);
+safeRequireRoute('./routes/calendar', '/api/calendar', app);
+safeRequireRoute('./routes/ai', '/api/ai', app);
+safeRequireRoute('./routes/alerts', '/api/alerts', app);
+safeRequireRoute('./routes/fundamentals', '/api/fundamentals', app);
+safeRequireRoute('./routes/news', '/api/news', app);
 
 // خطای عمومی — هرگز کرش نکن، همیشه پاسخ ساختاریافته بده
 app.use((err, req, res, next) => {
