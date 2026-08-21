@@ -16,6 +16,9 @@ const cors = require('cors');
 const marketRoutes = require('./routes/market');
 const calendarRoutes = require('./routes/calendar');
 const aiRoutes = require('./routes/ai');
+const alertsRoutes = require('./routes/alerts');
+const fundamentalsRoutes = require('./routes/fundamentals');
+const newsRoutes = require('./routes/news');
 
 const app = express();
 app.use(cors());
@@ -28,6 +31,9 @@ app.get('/api/health', (req, res) => {
 app.use('/api/market', marketRoutes);
 app.use('/api/calendar', calendarRoutes);
 app.use('/api/ai', aiRoutes);
+app.use('/api/alerts', alertsRoutes);
+app.use('/api/fundamentals', fundamentalsRoutes);
+app.use('/api/news', newsRoutes);
 
 // خطای عمومی — هرگز کرش نکن، همیشه پاسخ ساختاریافته بده
 app.use((err, req, res, next) => {
