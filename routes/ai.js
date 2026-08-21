@@ -5,6 +5,8 @@
 // خروجی: تحلیل روایی (narrative) تولیدشده توسط یک مدل زبانی واقعی، صرفاً بر پایه
 //        همان داده‌های ساختاریافته — نه حدس قیمت.
 //
+// از Google Gemini API استفاده می‌کند (رایگان، بدون نیاز به کارت بانکی —
+// کلید را از aistudio.google.com بگیر).
 // اگر AI_API_KEY تنظیم نشده باشد، این روت با status=UNAVAILABLE پاسخ می‌دهد
 // و فرانت‌اند به‌صورت شفاف اعلام می‌کند که AI واقعی متصل نیست
 // (و از تحلیل قانون‌محور محلی/Rule Engine به‌عنوان جایگزین شفاف استفاده می‌کند).
@@ -29,28 +31,29 @@ router.post('/analyze', async (req, res) => {
 اگر داده‌ای برای نتیجه‌گیری کافی نیست، صریحاً بگو "WAIT" و دلیل را توضیح بده.
 خروجی را به فارسی و کوتاه (حداکثر ۱۲۰ کلمه) و کاربردی برای یک معامله‌گر بنویس.`;
 
+  const model = process.env.AI_MODEL || 'gemini-2.5-flash';
+  const baseUrl = process.env.AI_API_BASE_URL || `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+
   try {
-    const r = await fetch(process.env.AI_API_BASE_URL || 'https://api.anthropic.com/v1/messages', {
+    const r = await fetch(`${baseUrl}?key=${apiKey}`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01'
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: process.env.AI_MODEL || 'claude-sonnet-4-6',
-        max_tokens: 500,
-        system: systemPrompt,
-        messages: [
-          { role: 'user', content: `داده‌های ساختاریافته سیستم:\n${JSON.stringify(structuredState)}` }
-        ]
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        contents: [
+          { role: 'user', parts: [{ text: `داده‌های ساختاریافته سیستم:\n${JSON.stringify(structuredState)}` }] }
+        ],
+        generationConfig: { maxOutputTokens: 500 }
       }),
       timeout: 15000
     });
 
     if (!r.ok) return res.json({ status: 'UNAVAILABLE', error: `ai-provider-http-${r.status}` });
     const data = await r.json();
-    const text = (data.content || []).map((b) => b.text || '').join('\n').trim();
+    const candidate = data.candidates && data.candidates[0];
+    const text = candidate && candidate.content && candidate.content.parts
+      ? candidate.content.parts.map((p) => p.text || '').join('\n').trim()
+      : '';
     if (!text) return res.json({ status: 'UNAVAILABLE', error: 'ai-empty-response' });
 
     res.json({ status: 'LIVE', narrative: text });
@@ -60,3 +63,4 @@ router.post('/analyze', async (req, res) => {
 });
 
 module.exports = router;
+
