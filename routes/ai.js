@@ -31,13 +31,13 @@ router.post('/analyze', async (req, res) => {
 اگر داده‌ای برای نتیجه‌گیری کافی نیست، صریحاً بگو "WAIT" و دلیل را توضیح بده.
 خروجی را به فارسی و کوتاه (حداکثر ۱۲۰ کلمه) و کاربردی برای یک معامله‌گر بنویس.`;
 
-  const model = process.env.AI_MODEL || 'gemini-2.5-flash';
+  const model = process.env.AI_MODEL || 'gemini-flash-latest';
   const baseUrl = process.env.AI_API_BASE_URL || `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
   try {
-    const r = await fetch(`${baseUrl}?key=${apiKey}`, {
+    const r = await fetch(baseUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-goog-api-key': apiKey },
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: systemPrompt }] },
         contents: [
@@ -63,4 +63,3 @@ router.post('/analyze', async (req, res) => {
 });
 
 module.exports = router;
-
