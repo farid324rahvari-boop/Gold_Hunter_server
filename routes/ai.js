@@ -36,6 +36,7 @@ router.post('/analyze', async (req, res) => {
 - fundamentalBias / fundamentalReasons: نتیجه‌گیری فاندامنتال از تقویم اقتصادی
 - macroIndicators: داده‌های واقعی و رسمی فدرال رزرو (نرخ بهره، تورم CPI/Core CPI، بیکاری، اشتغال)
 - newsRisk: ریسک نزدیک بودن یک خبر مهم
+- signal: خروجی Day-Trading Signal Engine شامل direction, entry, trigger, stopLoss, targets, rr, invalidation, obstacles و consensus
 اگر یکی از این بخش‌ها در تحلیل نهایی نقشی دارد (مثلاً نرخ بهره بالا یا تورم پایین)، صریحاً به آن اشاره کن.
 
 پاسخ را دقیقاً با این ساختار و به فارسی روان بنویس (نه فهرست کدنویسی‌شده، متن طبیعی):
@@ -45,8 +46,7 @@ router.post('/analyze', async (req, res) => {
 ۳. **تحلیل فاندامنتال و کلان**: بر اساس macroIndicators و fundamentalBias توضیح بده فضای کلان اقتصادی
    (نرخ بهره، تورم، اشتغال) در حال حاضر برای طلا مثبت است یا منفی و چرا.
 ۴. **جمع‌بندی و شرط ورود**: اگر WAIT است، دقیقاً بگو چه اتفاقی (تکنیکال یا خبری) باید بیفتد تا شرایط
-   ورود فراهم شود. اگر BUY/SELL است، با استفاده از همان اعداد ورودی، نقطه ورود تقریبی، حد ضرر
-   ساختاری، و حداقل یک هدف قیمتی مشخص و عددی بنویس.
+   ورود فراهم شود. اگر BUY/SELL است، دقیقاً entry zone، مبنای ورود، trigger، stop loss، TP1/TP2/TP3، R:R، شرط ابطال و موانع سیگنال را از فیلد signal بخوان و عدد جدید نساز. اگر signal تصمیم WAIT دارد، فقط شرط فعال‌شدن trigger را توضیح بده و ورود قطعی صادر نکن.
 
 طول پاسخ: حداکثر ۳۰۰ کلمه — کامل و کاربردی، نه تلگرافی، ولی بدون حاشیه‌روی اضافه.`;
 
@@ -62,6 +62,9 @@ router.post('/analyze', async (req, res) => {
         contents: [
           { role: 'user', parts: [{ text: `داده‌های ساختاریافته سیستم:\n${JSON.stringify(structuredState)}` }] }
         ],
+        // این مدل به‌صورت پیش‌فرض حالت «فکرکردن» (Thinking) دارد که باعث می‌شود بخشی از فرآیند
+        // استدلال داخلی (نه جواب نهایی) در خروجی درز کند یا جواب قبل از تمام‌شدن قطع شود.
+        // برای این کار ساده (تولید یک تحلیل کوتاه)، آن را خاموش می‌کنیم.
         generationConfig: { maxOutputTokens: 1200, thinkingConfig: { thinkingBudget: 0 } }
       }),
       timeout: 15000
@@ -70,6 +73,7 @@ router.post('/analyze', async (req, res) => {
 
   try {
     let r = await callGemini();
+    // خطای 503 یعنی سرورهای گوگل موقتاً شلوغ بودند (نه مشکل تنظیمات) — یک‌بار با کمی تأخیر دوباره امتحان می‌کنیم
     if (r.status === 503) {
       await new Promise((resolve) => setTimeout(resolve, 1500));
       r = await callGemini();
@@ -78,6 +82,8 @@ router.post('/analyze', async (req, res) => {
     if (!r.ok) return res.json({ status: 'UNAVAILABLE', error: `ai-provider-http-${r.status}` });
     const data = await r.json();
     const candidate = data.candidates && data.candidates[0];
+    // بخش‌های علامت‌خورده به‌عنوان "thought" (فرآیند فکرکردن داخلی مدل) کنار گذاشته می‌شوند —
+    // فقط جواب نهایی واقعی در خروجی قرار می‌گیرد.
     const text = candidate && candidate.content && candidate.content.parts
       ? candidate.content.parts.filter((p) => !p.thought).map((p) => p.text || '').join('\n').trim()
       : '';
@@ -90,3 +96,4 @@ router.post('/analyze', async (req, res) => {
 });
 
 module.exports = router;
+
