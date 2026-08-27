@@ -12,6 +12,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const { startAutoAlert } = require('./services/auto-alert');
 
 // بارگذاری امن هر روت — اگر یک فایل روت گم یا خراب باشد (مثلاً هنوز آپلود نشده)،
 // فقط همان بخش غیرفعال می‌شود، نه کل سرور. این از کرش کامل سرور (که همه‌چیز از جمله
@@ -39,8 +40,10 @@ safeRequireRoute('./routes/market', '/api/market', app);
 safeRequireRoute('./routes/calendar', '/api/calendar', app);
 safeRequireRoute('./routes/ai', '/api/ai', app);
 safeRequireRoute('./routes/alerts', '/api/alerts', app);
+safeRequireRoute('./routes/auto-alert', '/api/auto-alert', app);
 safeRequireRoute('./routes/fundamentals', '/api/fundamentals', app);
 safeRequireRoute('./routes/news', '/api/news', app);
+safeRequireRoute('./routes/signal', '/api/signal', app);
 
 // خطای عمومی — هرگز کرش نکن، همیشه پاسخ ساختاریافته بده
 app.use((err, req, res, next) => {
@@ -49,4 +52,7 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 8787;
-app.listen(PORT, () => console.log(`Gold Hunter proxy listening on :${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Gold Hunter proxy listening on :${PORT}`);
+  startAutoAlert();
+});
