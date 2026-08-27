@@ -72,6 +72,21 @@ async function checkAndAlert() {
   } finally { running = false; }
 }
 
+// ارسال فوری و دستی — برخلاف checkAndAlert، صرف‌نظر از اینکه تصمیم BUY/SELL باشد یا WAIT،
+// و صرف‌نظر از Cooldown/تکراری‌بودن، وضعیت فعلی را همین الان به تلگرام می‌فرستد.
+// این برای دکمه «ارسال تحلیل به تلگرام» در خود اپ استفاده می‌شود، نه برای هشدار خودکار دوره‌ای.
+async function sendNow() {
+  try {
+    const payload = await fetchSignal();
+    if (payload.status !== 'LIVE') return { ok: false, error: payload.error || 'signal-unavailable' };
+    const result = await sendTelegramMessage(formatSignal(payload));
+    if (result.ok) return { ok: true, sent: true, decision: payload.signal?.decision };
+    return { ok: false, error: result.error || 'telegram-send-failed' };
+  } catch (e) {
+    return { ok: false, error: e.message || 'send-now-error' };
+  }
+}
+
 function startAutoAlert() {
   if (timer) clearInterval(timer);
   if (process.env.AUTO_ALERT_ENABLED !== 'true') return false;
@@ -82,4 +97,4 @@ function startAutoAlert() {
 }
 
 function status() { return { enabled: process.env.AUTO_ALERT_ENABLED === 'true', running, lastCheck, lastSentAt: lastSentAt ? new Date(lastSentAt).toISOString() : null }; }
-module.exports = { startAutoAlert, checkAndAlert, status };
+module.exports = { startAutoAlert, checkAndAlert, sendNow, status };
