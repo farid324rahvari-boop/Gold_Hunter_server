@@ -16,6 +16,7 @@ function formatSignal(payload) {
   const icon = s.decision === 'BUY' ? '🟢' : s.decision === 'SELL' ? '🔴' : '🟡';
   const t = s.targets || [];
   const entry = s.trade?.entry || s.entry || {};
+  const hypothetical = s.trade?.isHypothetical;
   return [
     `<b>شکارچی طلا 🏹</b>`,
     ``,
@@ -23,6 +24,7 @@ function formatSignal(payload) {
     `قیمت: <b>${esc(payload.market?.price)}</b>`,
     `اعتماد: <b>${esc(s.confidence)}%</b>`,
     ``,
+    hypothetical ? `⚠ <i>سیگنال ورود فعال نیست — سطوح زیر صرفاً یک سناریوی فرضی (نزدیک‌ترین جهت محتمل) برای اطلاع است، نه توصیه ورود:</i>` : ``,
     `<b>Entry:</b> ${esc(entry.low)} – ${esc(entry.high)}`,
     `<b>SL:</b> ${esc(s.trade?.stopLoss ?? s.stopLoss)}`,
     `<b>TP1:</b> ${esc(s.trade?.targets?.[0] ?? t[0])}`,
@@ -37,7 +39,7 @@ function formatSignal(payload) {
     ``,
     `<b>زمان:</b> ${new Date(payload.fetchedAt || Date.now()).toLocaleString('fa-IR')}`,
     `<i>هشدار تحلیلی است؛ اجرای معامله خودکار انجام نمی‌شود.</i>`
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 async function fetchSignal() {
