@@ -62,7 +62,14 @@ function buildTrade(d,dir){const p=d.m15.price,a=d.m15.atr||2,levels=nearestLeve
     const resistance=Math.min(d.m15.range.high,d.m15.ema20||d.m15.range.high);entryHigh=Math.min(d.m15.range.high,p+a*MAX_SPREAD_PROXY_ATR);entryLow=Math.max(p-a*.20,resistance-a*.35);if(entryLow>entryHigh)entryLow=entryHigh-a*.15;sl=Math.max(d.m15.range.high+a*.25,p+a*1.15);if(levels.nextResistance&&levels.nextResistance>entryHigh)sl=Math.max(sl,levels.nextResistance+a*.15);const risk=sl-entryLow;const rTarget=entryLow-risk*MIN_RR;tp1=levels.nextSupport&&levels.nextSupport<entryLow?Math.max(levels.nextSupport,rTarget):rTarget;tp2=entryLow-risk*2.4;tp3=entryLow-risk*3.2;trigger=sweep?'15M Sweep High + CHoCH/BOS نزولی + کلوز زیر EMA20 + RSI<50 + حجم تأیید':'15M CHoCH/BOS نزولی + کلوز زیر EMA20 + RSI<50 + حجم تأیید';}
   const rr=dir==='BUY'?(tp1-entryHigh)/(entryHigh-sl):(entryLow-tp1)/(sl-entryLow);return {entry:{low:fmt(entryLow),high:fmt(entryHigh)},stopLoss:fmt(sl),targets:[fmt(tp1),fmt(tp2),fmt(tp3)],rr:fmt(rr),trigger,levels};}
 
-function decide(d,fund,news){const sc=strategyScores(d,fund);const dir=sc.buy>sc.sell?'BUY':sc.sell>sc.buy?'SELL':'WAIT';const gap=Math.abs(sc.buy-sc.sell);let confidence=clamp(50+gap*.8);const trade=dir==='WAIT'?null:buildTrade(d,dir);const blockers=[];
+function decide(d,fund,news){const sc=strategyScores(d,fund);const dir=sc.buy>sc.sell?'BUY':sc.sell>sc.buy?'SELL':'WAIT';const gap=Math.abs(sc.buy-sc.sell);let confidence=clamp(50+gap*.8);
+  // حتی وقتی امتیاز خرید/فروش دقیقاً مساوی است (dir=WAIT)، یک سناریوی فرضی بر اساس سمتی که
+  // (هرچند به‌سختی) بالاتر است ساخته می‌شود — تا دکمه «ارسال به تلگرام» همیشه یک Entry/SL/TP
+  // برای نمایش داشته باشد. این یک تصمیم قطعی نیست؛ فیلد isHypothetical این را مشخص می‌کند.
+  const tradeDir = dir === 'WAIT' ? (sc.buy >= sc.sell ? 'BUY' : 'SELL') : dir;
+  const trade = buildTrade(d, tradeDir);
+  if (dir === 'WAIT') trade.isHypothetical = true;
+  const blockers=[];
   if(gap<18)blockers.push('اجماع استراتژی‌ها کافی نیست');
   if(d.m15.structure==='MIXED')blockers.push('ساختار 15M شفاف نیست');
   if(d.m15.rsi>=72||d.m15.rsi<=28)blockers.push('Momentum در ناحیه افراطی است');
