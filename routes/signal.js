@@ -87,12 +87,17 @@ function buildTrade(d,dir){
     const floor2=entryHigh+risk*TP2_R;
     const floor3=entryHigh+risk*TP3_R;
     const structural=pickLevels(entryHigh,minGap,6);
-    const valid1=structural.find(x=>x>=floor1);
+    // ATR-based ceiling: structural targets may be used, but they must not
+    // be allowed to jump unreasonably far beyond the current volatility.
+    const cap1=entryHigh+Math.max(risk*MIN_RR,a*2.5);
+    const cap2=entryHigh+Math.max(risk*TP2_R,a*4.0);
+    const cap3=entryHigh+Math.max(risk*TP3_R,a*6.0);
+    const valid1=structural.find(x=>x>=floor1&&x<=cap1);
     tp1=valid1||floor1;
-    const valid2=structural.find(x=>x>=Math.max(floor2,tp1+minGap));
-    tp2=valid2||Math.max(floor2,tp1+minGap);
-    const valid3=structural.find(x=>x>=Math.max(floor3,tp2+minGap));
-    tp3=valid3||Math.max(floor3,tp2+minGap);
+    const valid2=structural.find(x=>x>=Math.max(floor2,tp1+minGap)&&x<=cap2);
+    tp2=valid2||Math.min(Math.max(floor2,tp1+minGap),cap2);
+    const valid3=structural.find(x=>x>=Math.max(floor3,tp2+minGap)&&x<=cap3);
+    tp3=valid3||Math.min(Math.max(floor3,tp2+minGap),cap3);
     trigger=sweep?'15M Sweep Low + CHoCH/BOS صعودی + کلوز بالای EMA20 + RSI>50 + حجم تأیید':'15M CHoCH/BOS صعودی + کلوز بالای EMA20 + RSI>50 + حجم تأیید';
   }else{
     const resistance=Math.min(d.m15.range.high,d.m15.ema20||d.m15.range.high);
@@ -107,12 +112,16 @@ function buildTrade(d,dir){
     const floor2=entryLow-risk*TP2_R;
     const floor3=entryLow-risk*TP3_R;
     const structural=pickLevels(entryLow,minGap,6);
-    const valid1=structural.find(x=>x<=floor1);
+    // ATR-based ceiling for SELL targets.
+    const cap1=entryLow-Math.max(risk*MIN_RR,a*2.5);
+    const cap2=entryLow-Math.max(risk*TP2_R,a*4.0);
+    const cap3=entryLow-Math.max(risk*TP3_R,a*6.0);
+    const valid1=structural.find(x=>x<=floor1&&x>=cap1);
     tp1=valid1||floor1;
-    const valid2=structural.find(x=>x<=Math.min(floor2,tp1-minGap));
-    tp2=valid2||Math.min(floor2,tp1-minGap);
-    const valid3=structural.find(x=>x<=Math.min(floor3,tp2-minGap));
-    tp3=valid3||Math.min(floor3,tp2-minGap);
+    const valid2=structural.find(x=>x<=Math.min(floor2,tp1-minGap)&&x>=cap2);
+    tp2=valid2||Math.max(Math.min(floor2,tp1-minGap),cap2);
+    const valid3=structural.find(x=>x<=Math.min(floor3,tp2-minGap)&&x>=cap3);
+    tp3=valid3||Math.max(Math.min(floor3,tp2-minGap),cap3);
     trigger=sweep?'15M Sweep High + CHoCH/BOS نزولی + کلوز زیر EMA20 + RSI<50 + حجم تأیید':'15M CHoCH/BOS نزولی + کلوز زیر EMA20 + RSI<50 + حجم تأیید';
   }
   const finalRisk=dir==='BUY'?Math.max(entryHigh-sl,0.0001):Math.max(sl-entryLow,0.0001);
@@ -127,7 +136,7 @@ function buildTrade(d,dir){
     tp3=Math.min(tp3,tp2-finalGap,entryLow-finalRisk*TP3_R);
   }
   const rr=dir==='BUY'?(tp1-entryHigh)/(entryHigh-sl):(entryLow-tp1)/(sl-entryLow);
-  return {entry:{low:fmt(entryLow),high:fmt(entryHigh)},stopLoss:fmt(sl),targets:[fmt(tp1),fmt(tp2),fmt(tp3)],rr:fmt(rr),trigger,levels,targetModel:{minAtrGap:fmt(finalGap),tpR:[MIN_RR,TP2_R,TP3_R]}};
+  return {entry:{low:fmt(entryLow),high:fmt(entryHigh)},stopLoss:fmt(sl),targets:[fmt(tp1),fmt(tp2),fmt(tp3)],rr:fmt(rr),trigger,levels,targetModel:{minAtrGap:fmt(finalGap),tpR:[MIN_RR,TP2_R,TP3_R],maxAtr:[2.5,4.0,6.0]}};
 }
 
 function decide(d,fund,news){const sc=strategyScores(d,fund);const dir=sc.buy>sc.sell?'BUY':sc.sell>sc.buy?'SELL':'WAIT';const gap=Math.abs(sc.buy-sc.sell);let confidence=clamp(50+gap*.8);
