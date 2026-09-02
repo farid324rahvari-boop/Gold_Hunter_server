@@ -10,6 +10,9 @@ const TF = { '15M':'15min', '1H':'1h', '4H':'4h', 'Daily':'1day' };
 const MIN_CONFIDENCE = Number(process.env.MIN_SIGNAL_CONFIDENCE || 72);
 const MIN_RR = Number(process.env.MIN_SIGNAL_RR || 1.8);
 const MAX_SPREAD_PROXY_ATR = Number(process.env.MAX_ENTRY_ATR_DISTANCE || 0.55);
+const TARGET_MIN_ATR_GAP = Number(process.env.TARGET_MIN_ATR_GAP || 0.75);
+const TP2_R = Number(process.env.TP2_R || 2.7);
+const TP3_R = Number(process.env.TP3_R || 3.8);
 
 const clamp=(x,a=0,b=100)=>Math.max(a,Math.min(b,x));
 const fmt=x=>Number(Number(x).toFixed(2));
@@ -55,12 +58,77 @@ function strategyScores(d,fund){let buy=0,sell=0,why=[];
 
 function nearestLevels(price,dir,d){const levels=[...d.m15.pivots.highs,...d.m15.pivots.lows,d.h1.range.high,d.h1.range.low,d.h4.range.high,d.h4.range.low,d.daily.range.high,d.daily.range.low].filter(Number.isFinite);const above=[...new Set(levels.filter(x=>x>price+0.15))].sort((a,b)=>a-b);const below=[...new Set(levels.filter(x=>x<price-0.15))].sort((a,b)=>b-a);return dir==='BUY'?{nextResistance:above[0]||null,nextSupport:below[0]||null}:{nextResistance:above[0]||null,nextSupport:below[0]||null};}
 
-function buildTrade(d,dir){const p=d.m15.price,a=d.m15.atr||2,levels=nearestLevels(p,dir,d);let entryLow,entryHigh,sl,tp1,tp2,tp3,trigger;const sweep=dir==='BUY'?d.m15.sweep==='SWEEP_LOW':d.m15.sweep==='SWEEP_HIGH';
+function buildTrade(d,dir){
+  const p=d.m15.price,a=d.m15.atr||2,levels=nearestLevels(p,dir,d);let entryLow,entryHigh,sl,tp1,tp2,tp3,trigger;
+  const sweep=dir==='BUY'?d.m15.sweep==='SWEEP_LOW':d.m15.sweep==='SWEEP_HIGH';
+  // Target ladder: never accept an immediately adjacent S/R level as TP1/TP2/TP3.
+  // Targets must clear a minimum R multiple and a volatility-based spacing filter.
+  const rawLevels=[...d.m15.pivots.highs,...d.m15.pivots.lows,d.h1.range.high,d.h1.range.low,d.h4.range.high,d.h4.range.low,d.daily.range.high,d.daily.range.low]
+    .filter(Number.isFinite).sort((x,y)=>x-y);
+  const uniqueLevels=[...new Set(rawLevels.map(x=>fmt(x)))];
+  const pickLevels=(start,minDistance,count)=>{
+    const candidates=dir==='BUY'
+      ? uniqueLevels.filter(x=>x>start+minDistance)
+      : uniqueLevels.filter(x=>x<start-minDistance).sort((x,y)=>y-x);
+    const out=[]; let cursor=start;
+    for(const x of candidates){if(Math.abs(x-cursor)>=minDistance){out.push(x);cursor=x;if(out.length===count)break;}}
+    return out;
+  };
   if(dir==='BUY'){
-    const support=Math.max(d.m15.range.low, d.m15.ema20||d.m15.range.low);entryLow=Math.max(d.m15.range.low,p-a*MAX_SPREAD_PROXY_ATR);entryHigh=Math.min(p+a*.20,support+a*.35);if(entryHigh<entryLow)entryHigh=entryLow+a*.15;sl=Math.min(d.m15.range.low-a*.25,p-a*1.15);if(levels.nextSupport&&levels.nextSupport<entryLow)sl=Math.min(sl,levels.nextSupport-a*.15);const risk=entryHigh-sl;const rTarget=entryHigh+risk*MIN_RR;tp1=levels.nextResistance&&levels.nextResistance>entryHigh?Math.min(levels.nextResistance,rTarget):rTarget;tp2=entryHigh+risk*2.4;tp3=entryHigh+risk*3.2;trigger=sweep?'15M Sweep Low + CHoCH/BOS صعودی + کلوز بالای EMA20 + RSI>50 + حجم تأیید':'15M CHoCH/BOS صعودی + کلوز بالای EMA20 + RSI>50 + حجم تأیید';
+    const support=Math.max(d.m15.range.low,d.m15.ema20||d.m15.range.low);
+    entryLow=Math.max(d.m15.range.low,p-a*MAX_SPREAD_PROXY_ATR);
+    entryHigh=Math.min(p+a*.20,support+a*.35);
+    if(entryHigh<entryLow)entryHigh=entryLow+a*.15;
+    sl=Math.min(d.m15.range.low-a*.25,p-a*1.15);
+    if(levels.nextSupport&&levels.nextSupport<entryLow)sl=Math.min(sl,levels.nextSupport-a*.15);
+    const risk=Math.max(entryHigh-sl,0.0001);
+    const minGap=Math.max(a*TARGET_MIN_ATR_GAP,risk*.50);
+    const floor1=entryHigh+risk*MIN_RR;
+    const floor2=entryHigh+risk*TP2_R;
+    const floor3=entryHigh+risk*TP3_R;
+    const structural=pickLevels(entryHigh,minGap,6);
+    const valid1=structural.find(x=>x>=floor1);
+    tp1=valid1||floor1;
+    const valid2=structural.find(x=>x>=Math.max(floor2,tp1+minGap));
+    tp2=valid2||Math.max(floor2,tp1+minGap);
+    const valid3=structural.find(x=>x>=Math.max(floor3,tp2+minGap));
+    tp3=valid3||Math.max(floor3,tp2+minGap);
+    trigger=sweep?'15M Sweep Low + CHoCH/BOS صعودی + کلوز بالای EMA20 + RSI>50 + حجم تأیید':'15M CHoCH/BOS صعودی + کلوز بالای EMA20 + RSI>50 + حجم تأیید';
   }else{
-    const resistance=Math.min(d.m15.range.high,d.m15.ema20||d.m15.range.high);entryHigh=Math.min(d.m15.range.high,p+a*MAX_SPREAD_PROXY_ATR);entryLow=Math.max(p-a*.20,resistance-a*.35);if(entryLow>entryHigh)entryLow=entryHigh-a*.15;sl=Math.max(d.m15.range.high+a*.25,p+a*1.15);if(levels.nextResistance&&levels.nextResistance>entryHigh)sl=Math.max(sl,levels.nextResistance+a*.15);const risk=sl-entryLow;const rTarget=entryLow-risk*MIN_RR;tp1=levels.nextSupport&&levels.nextSupport<entryLow?Math.max(levels.nextSupport,rTarget):rTarget;tp2=entryLow-risk*2.4;tp3=entryLow-risk*3.2;trigger=sweep?'15M Sweep High + CHoCH/BOS نزولی + کلوز زیر EMA20 + RSI<50 + حجم تأیید':'15M CHoCH/BOS نزولی + کلوز زیر EMA20 + RSI<50 + حجم تأیید';}
-  const rr=dir==='BUY'?(tp1-entryHigh)/(entryHigh-sl):(entryLow-tp1)/(sl-entryLow);return {entry:{low:fmt(entryLow),high:fmt(entryHigh)},stopLoss:fmt(sl),targets:[fmt(tp1),fmt(tp2),fmt(tp3)],rr:fmt(rr),trigger,levels};}
+    const resistance=Math.min(d.m15.range.high,d.m15.ema20||d.m15.range.high);
+    entryHigh=Math.min(d.m15.range.high,p+a*MAX_SPREAD_PROXY_ATR);
+    entryLow=Math.max(p-a*.20,resistance-a*.35);
+    if(entryLow>entryHigh)entryLow=entryHigh-a*.15;
+    sl=Math.max(d.m15.range.high+a*.25,p+a*1.15);
+    if(levels.nextResistance&&levels.nextResistance>entryHigh)sl=Math.max(sl,levels.nextResistance+a*.15);
+    const risk=Math.max(sl-entryLow,0.0001);
+    const minGap=Math.max(a*TARGET_MIN_ATR_GAP,risk*.50);
+    const floor1=entryLow-risk*MIN_RR;
+    const floor2=entryLow-risk*TP2_R;
+    const floor3=entryLow-risk*TP3_R;
+    const structural=pickLevels(entryLow,minGap,6);
+    const valid1=structural.find(x=>x<=floor1);
+    tp1=valid1||floor1;
+    const valid2=structural.find(x=>x<=Math.min(floor2,tp1-minGap));
+    tp2=valid2||Math.min(floor2,tp1-minGap);
+    const valid3=structural.find(x=>x<=Math.min(floor3,tp2-minGap));
+    tp3=valid3||Math.min(floor3,tp2-minGap);
+    trigger=sweep?'15M Sweep High + CHoCH/BOS نزولی + کلوز زیر EMA20 + RSI<50 + حجم تأیید':'15M CHoCH/BOS نزولی + کلوز زیر EMA20 + RSI<50 + حجم تأیید';
+  }
+  const finalRisk=dir==='BUY'?Math.max(entryHigh-sl,0.0001):Math.max(sl-entryLow,0.0001);
+  const finalGap=Math.max(a*TARGET_MIN_ATR_GAP,finalRisk*.50);
+  if(dir==='BUY'){
+    tp1=Math.max(tp1,entryHigh+finalRisk*MIN_RR);
+    tp2=Math.max(tp2,tp1+finalGap,entryHigh+finalRisk*TP2_R);
+    tp3=Math.max(tp3,tp2+finalGap,entryHigh+finalRisk*TP3_R);
+  }else{
+    tp1=Math.min(tp1,entryLow-finalRisk*MIN_RR);
+    tp2=Math.min(tp2,tp1-finalGap,entryLow-finalRisk*TP2_R);
+    tp3=Math.min(tp3,tp2-finalGap,entryLow-finalRisk*TP3_R);
+  }
+  const rr=dir==='BUY'?(tp1-entryHigh)/(entryHigh-sl):(entryLow-tp1)/(sl-entryLow);
+  return {entry:{low:fmt(entryLow),high:fmt(entryHigh)},stopLoss:fmt(sl),targets:[fmt(tp1),fmt(tp2),fmt(tp3)],rr:fmt(rr),trigger,levels,targetModel:{minAtrGap:fmt(finalGap),tpR:[MIN_RR,TP2_R,TP3_R]}};
+}
 
 function decide(d,fund,news){const sc=strategyScores(d,fund);const dir=sc.buy>sc.sell?'BUY':sc.sell>sc.buy?'SELL':'WAIT';const gap=Math.abs(sc.buy-sc.sell);let confidence=clamp(50+gap*.8);
   // حتی وقتی امتیاز خرید/فروش دقیقاً مساوی است (dir=WAIT)، یک سناریوی فرضی بر اساس سمتی که
