@@ -17,12 +17,17 @@ function formatSignal(payload) {
   const t = s.targets || [];
   const entry = s.trade?.entry || s.entry || {};
   const hypothetical = s.trade?.isHypothetical;
+  const voteIcon = (v) => v === 'BUY' ? '🟢' : v === 'SELL' ? '🔴' : '⚪';
+  const strategyLines = (s.strategies || []).map((st) => `${voteIcon(st.vote)} ${esc(st.name)}: ${esc(st.vote)}`);
   return [
     `<b>شکارچی طلا 🏹</b>`,
     ``,
     `${icon} <b>${esc(s.decision || 'WAIT')}</b> — ${esc(payload.symbol || 'XAU/USD')}`,
     `قیمت: <b>${esc(payload.market?.price)}</b>`,
-    `اعتماد: <b>${esc(s.confidence)}%</b>`,
+    `اعتماد اجماع: <b>${esc(s.confidence)}%</b> (${esc(s.consensus?.agreeCount)}/${esc(s.consensus?.totalCount)} استراتژی هم‌جهت)`,
+    ``,
+    `<b>رأی هر استراتژی:</b>`,
+    ...strategyLines,
     ``,
     hypothetical ? `⚠ <i>سیگنال ورود فعال نیست — سطوح زیر صرفاً یک سناریوی فرضی (نزدیک‌ترین جهت محتمل) برای اطلاع است، نه توصیه ورود:</i>` : ``,
     `<b>Entry:</b> ${esc(entry.low)} – ${esc(entry.high)}`,
@@ -33,8 +38,7 @@ function formatSignal(payload) {
     `<b>R:R:</b> 1:${esc(s.trade?.rr ?? s.rr)}`,
     ``,
     `<b>Trigger:</b> ${esc(s.trade?.trigger || s.trigger)}`,
-    `<b>امتیاز:</b> BUY ${esc(s.scores?.buy)} | SELL ${esc(s.scores?.sell)}`,
-    `<b>Fundamental:</b> ${esc(s.fundamental?.bias || 'N/A')}`, 
+    `<b>امتیاز وزنی:</b> BUY ${esc(s.scores?.buy)} | SELL ${esc(s.scores?.sell)}`,
     s.blockers?.length ? `<b>موانع:</b> ${esc(s.blockers.join(' | '))}` : `موانع: ندارد`,
     ``,
     `<b>زمان:</b> ${new Date(payload.fetchedAt || Date.now()).toLocaleString('fa-IR')}`,
