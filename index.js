@@ -44,6 +44,7 @@ safeRequireRoute('./routes/auto-alert', '/api/auto-alert', app);
 safeRequireRoute('./routes/fundamentals', '/api/fundamentals', app);
 safeRequireRoute('./routes/news', '/api/news', app);
 safeRequireRoute('./routes/signal', '/api/signal', app);
+safeRequireRoute('./routes/backtest', '/api/backtest', app);
 
 // خطای عمومی — هرگز کرش نکن، همیشه پاسخ ساختاریافته بده
 app.use((err, req, res, next) => {
