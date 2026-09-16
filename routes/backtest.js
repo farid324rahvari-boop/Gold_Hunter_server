@@ -27,6 +27,9 @@ router.get('/', async (req, res) => {
 
   const m15Bars = Math.min(Number(req.query.bars) || 1500, 3000); // پیش‌فرض ~۱۵ روز کندل ۱۵دقیقه‌ای
   const rollingWindow = 220; // همان اندازه‌ای که سیگنال زنده استفاده می‌کند
+  // حداکثر نگه‌داری معامله باز — پیش‌فرض ۳ روز (به‌جای ۱ روز قبلی) چون اکثر معاملات با سقف ۱روزه
+  // به‌جای برخورد تمیز به SL/TP، با Timeout بسته می‌شدند؛ با ?maxHoldDays= قابل‌تنظیم است.
+  const maxHoldBars = Math.min(Number(req.query.maxHoldDays) || 3, 10) * 4 * 24;
 
   try {
     const [m15, h1, h4, daily] = await Promise.all([
@@ -64,7 +67,7 @@ router.get('/', async (req, res) => {
           const rewardDist = Math.abs(position.tp1 - position.entry);
           trades.push({ ...position, exit: position.tp1, exitTime: bar.time, result: 'WIN', r: fmtR(rewardDist / riskDist) });
           position = null;
-        } else if (i - position.openIndex > 4 * 24) { // حداکثر نگه‌داری ~۱ روز (۹۶ کندل ۱۵دقیقه‌ای) سپس با قیمت فعلی بسته شود
+        } else if (i - position.openIndex > maxHoldBars) {
           const pl = position.dir === 'BUY' ? bar.close - position.entry : position.entry - bar.close;
           const riskDist = Math.abs(position.entry - position.sl);
           trades.push({ ...position, exit: bar.close, exitTime: bar.time, result: pl >= 0 ? 'TIMEOUT_WIN' : 'TIMEOUT_LOSS', r: fmtR(pl / riskDist) });
