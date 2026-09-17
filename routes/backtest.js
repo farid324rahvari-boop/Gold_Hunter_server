@@ -115,47 +115,30 @@ function simulate(m15,h1,h4,daily,rollingWindow,maxHoldBars,ignoreQuality=false)
 }
 
 router.get('/data-test', async (req, res) => {
-  if (!process.env.TWELVEDATA_API_KEY) {
-    return res.json({ status: 'UNAVAILABLE', error: 'no-api-key-configured' });
-  }
-
   const tf = String(req.query.tf || '15M').toUpperCase();
-  const allowed = ['15M', '1H', '4H', 'DAILY'];
-  const normalizedTf = tf === 'DAILY' ? 'Daily' : tf;
-  if (!allowed.includes(tf)) {
-    return res.status(400).json({ status: 'ERROR', error: 'invalid-timeframe', allowed });
+  const requested = Math.max(220, Math.min(Number(req.query.bars) || 220, 5000));
+  if (!['15M', '1H', '4H', 'DAILY'].includes(tf)) {
+    return res.json({ status: 'ERROR', error: 'invalid-timeframe', allowed: ['15M', '1H', '4H', 'Daily'] });
   }
-
-  const barsRequested = Math.max(220, Math.min(Number(req.query.bars) || 220, 5000));
-
+  const engineTf = tf === 'DAILY' ? 'Daily' : tf;
   try {
-    const bars = await engine.fetchTFHistory(normalizedTf, barsRequested);
-    const meta = typeof engine.getHistoryMeta === 'function'
-      ? engine.getHistoryMeta(normalizedTf)
+    const bars = await engine.fetchTFHistory(engineTf, requested);
+    const history = typeof engine.getHistoryMeta === 'function'
+      ? engine.getHistoryMeta(engineTf)
       : bars?.historyMeta || null;
-
     return res.json({
-      status: Array.isArray(bars) && bars.length ? 'OK' : 'UNAVAILABLE',
+      status: bars && bars.length ? 'OK' : 'ERROR',
+      timeframe: engineTf,
       symbol: engine.SYMBOL,
-      timeframe: normalizedTf,
-      requestedBars: barsRequested,
-      returnedBars: Array.isArray(bars) ? bars.length : 0,
-      history: meta,
-      sample: Array.isArray(bars) ? bars.slice(-5).map(b => ({
-        time: new Date(b.time).toISOString(),
-        open: b.open,
-        high: b.high,
-        low: b.low,
-        close: b.close,
-        volume: b.volume
-      })) : []
+      requested,
+      returned: bars?.length || 0,
+      history,
+      sample: bars?.slice(-5).map(b => ({
+        time: new Date(b.time).toISOString(), open: b.open, high: b.high, low: b.low, close: b.close, volume: b.volume
+      })) || []
     });
   } catch (e) {
-    return res.json({
-      status: 'ERROR',
-      error: 'data-test-exception: ' + e.message,
-      timeframe: normalizedTf
-    });
+    return res.json({ status: 'ERROR', error: 'data-test-exception: ' + e.message, timeframe: engineTf });
   }
 });
 
@@ -175,7 +158,7 @@ router.get('/',async(req,res)=>{
       engine.fetchTFHistory('4H',Math.ceil((m15Bars+rollingWindow)/16)+rollingWindow),
       engine.fetchTFHistory('Daily',Math.ceil((m15Bars+rollingWindow)/96)+rollingWindow)
     ]);
-    if(!m15||!h1||!h4||!daily) return res.json({status:'UNAVAILABLE',error:'market-data-unavailable',history:{m15:engine.getHistoryMeta?.('15M')||m15?.historyMeta||null,h1:engine.getHistoryMeta?.('1H')||h1?.historyMeta||null,h4:engine.getHistoryMeta?.('4H')||h4?.historyMeta||null,daily:engine.getHistoryMeta?.('Daily')||daily?.historyMeta||null}});
+    if(!m15||!h1||!h4||!daily) return res.json({status:'UNAVAILABLE',error:'market-data-unavailable',history:{m15:engine.getHistoryMeta?.('15M')||null,h1:engine.getHistoryMeta?.('1H')||null,h4:engine.getHistoryMeta?.('4H')||null,daily:engine.getHistoryMeta?.('Daily')||null}});
     if(m15.length<rollingWindow+50) return res.json({status:'UNAVAILABLE',error:'insufficient-history-for-backtest'});
 
     const qualityTrades=simulate(m15,h1,h4,daily,rollingWindow,maxHoldBars,false);
