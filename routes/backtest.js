@@ -1,185 +1,494 @@
-// /api/backtest — بک‌تست تاریخی Gold Hunter با همان engine زنده
-// بهبودها: pagination diagnostics، MFE/MAE صحیح بعد از ورود، Quality A/B،
-// خروج timeout، آمار جهت/جلسه/اعتماد/کیفیت، و جلوگیری از look-ahead در همان کندل ورود.
+// Gold Hunter — Historical Backtest
+// Independent-strategy architecture:
+// - No weighted consensus is used to activate a trade.
+// - Base = independent strategy trigger without the Quality layer.
+// - Quality = same independent trigger + Quality layer.
+// - At the moment Trend Following is the first strategy allowed to trigger;
+//   the other strategies remain diagnostics until their independent engines exist.
+// - Historical pagination diagnostics are preserved explicitly.
+// - Entry is simulated at the signal candle Close.
+// - FRED/News are neutral in historical mode.
+// - Spread/Commission/Slippage are not modeled.
+// - MFE/MAE are measured only from candles after entry.
+
 const express = require('express');
 const router = express.Router();
 const engine = require('../lib/engine');
 
-const fmt = x => Number(Number(x).toFixed(3));
-const sessionOf = ms => {
-  const h = new Date(ms).getUTCHours();
-  if (h >= 0 && h < 7) return 'ASIA';
-  if (h >= 7 && h < 13) return 'LONDON';
-  if (h >= 13 && h < 18) return 'NEW_YORK';
-  return 'NEW_YORK_LATE';
-};
+const STRATEGY_NAMES = [
+  'روند چندتایم‌فریمی',
+  'ساختار بازار (BOS/CHoCH)',
+  'Liquidity Sweep (SMC)',
+  'مومنتوم (RSI + EMA20)',
+  'Fibonacci Retracement',
+  'واگرایی RSI',
+  'فاندامنتال (FRED)'
+];
+
+function fmtR(x) { return Number(Number(x).toFixed(3)); }
 
 function advancePointer(bars, ptr, targetTime) {
   while (ptr + 1 < bars.length && bars[ptr + 1].time <= targetTime) ptr++;
   return ptr;
 }
 
-function tradeStats(trades) {
-  const closed = trades.filter(t => t.result !== 'OPEN_WIN' && t.result !== 'OPEN_LOSS');
-  const wins = closed.filter(t => t.r > 0);
-  const losses = closed.filter(t => t.r < 0);
-  const grossWin = wins.reduce((a,t)=>a+t.r,0);
-  const grossLoss = Math.abs(losses.reduce((a,t)=>a+t.r,0));
-  let running=0, peak=0, maxDD=0;
-  for(const t of trades){ running += t.r; peak=Math.max(peak,running); maxDD=Math.max(maxDD,peak-running); }
-  const durations=trades.filter(t=>Number.isFinite(t.exitTime)).map(t=>(t.exitTime-t.openTime)/3600000).sort((a,b)=>a-b);
-  const median=durations.length?durations[Math.floor(durations.length/2)]:0;
-  return {
-    total:trades.length, closed:closed.length, wins:wins.length, losses:losses.length,
-    winRate:closed.length?fmt(wins.length/closed.length*100):0,
-    netR:fmt(trades.reduce((a,t)=>a+t.r,0)), grossProfit:fmt(grossWin), grossLoss:fmt(grossLoss),
-    profitFactor:grossLoss?fmt(grossWin/grossLoss):null,
-    avgR:trades.length?fmt(trades.reduce((a,t)=>a+t.r,0)/trades.length):0,
-    maxDD:fmt(maxDD), avgDurationHours:durations.length?fmt(durations.reduce((a,b)=>a+b,0)/durations.length):0,
-    medianDurationHours:fmt(median), avgMFE:trades.length?fmt(trades.reduce((a,t)=>a+t.mfeR,0)/trades.length):0,
-    avgMAE:trades.length?fmt(trades.reduce((a,t)=>a+t.maeR,0)/trades.length):0
-  };
+function historyMeta(tf, bars) {
+  if (typeof engine.getHistoryMeta === 'function') return engine.getHistoryMeta(tf);
+  return bars?.historyMeta || null;
 }
 
-function groupStats(trades, keyFn) {
-  const groups={};
-  for(const t of trades){ const k=keyFn(t); (groups[k] ||= []).push(t); }
-  return Object.fromEntries(Object.entries(groups).map(([k,v])=>[k,tradeStats(v)]));
+function independentActive(signal, ignoreQuality) {
+  if (!signal || !['BUY', 'SELL'].includes(signal.decision)) return false;
+  if (!ignoreQuality) return true;
+  return true;
 }
 
-function simulate(m15,h1,h4,daily,rollingWindow,maxHoldBars,ignoreQuality=false) {
-  let h1Ptr=0,h4Ptr=0,dPtr=0,position=null;
-  const trades=[];
-  const startIdx=Math.max(rollingWindow,100);
+function updateMFE(position, bar) {
+  if (!position || !bar || !Number.isFinite(position.riskDist) || position.riskDist <= 0) return;
+  const mfe = position.dir === 'BUY'
+    ? (bar.high - position.entry) / position.riskDist
+    : (position.entry - bar.low) / position.riskDist;
+  const mae = position.dir === 'BUY'
+    ? (bar.low - position.entry) / position.riskDist
+    : (position.entry - bar.high) / position.riskDist;
+  position.mfe = Math.max(position.mfe || 0, mfe);
+  position.mae = Math.min(position.mae || 0, mae);
+}
 
-  for(let i=startIdx;i<m15.length;i++){
-    const bar=m15[i];
-    h1Ptr=advancePointer(h1,h1Ptr,bar.time); h4Ptr=advancePointer(h4,h4Ptr,bar.time); dPtr=advancePointer(daily,dPtr,bar.time);
-    if(h1Ptr<rollingWindow-30||h4Ptr<30||dPtr<20) continue;
+function simulate(m15, h1, h4, daily, rollingWindow, maxHoldBars, mode) {
+  let h1Ptr = 0, h4Ptr = 0, dPtr = 0;
+  let position = null;
+  const trades = [];
+  const ignoreQuality = mode === 'base';
+  const startIdx = Math.max(rollingWindow, 100);
 
-    // مدیریت معامله فقط با کندل‌های بعد از کندل ورود انجام می‌شود.
-    if(position){
-      const age=i-position.openIndex;
-      const risk=Math.abs(position.entry-position.sl);
-      // MFE/MAE include the entire post-entry candle, including the exit candle.
-      // If SL and TP are both inside one OHLC candle, SL is conservatively assumed
-      // to occur first because intrabar ordering is unknown.
-      const mfe=position.dir==='BUY'?(bar.high-position.entry)/risk:(position.entry-bar.low)/risk;
-      const mae=position.dir==='BUY'?(bar.low-position.entry)/risk:(position.entry-bar.high)/risk;
-      position.mfeR=Math.max(position.mfeR,mfe);
-      position.maeR=Math.min(position.maeR,mae);
-      const hitSL=position.dir==='BUY'?bar.low<=position.sl:bar.high>=position.sl;
-      const hitTP=position.dir==='BUY'?bar.high>=position.tp1:bar.low<=position.tp1;
-      if(hitSL){
-        trades.push({...position,exit:position.sl,exitTime:bar.time,result:'LOSS',r:-1,mfeR:position.mfeR,maeR:position.maeR});
-        position=null;
-      } else if(hitTP){
-        const reward=Math.abs(position.tp1-position.entry);
-        trades.push({...position,exit:position.tp1,exitTime:bar.time,result:'WIN',r:fmt(reward/risk),mfeR:position.mfeR,maeR:position.maeR});
-        position=null;
-      } else {
-        if(age>=maxHoldBars){
-          const pl=position.dir==='BUY'?bar.close-position.entry:position.entry-bar.close;
-          trades.push({...position,exit:bar.close,exitTime:bar.time,result:pl>=0?'TIMEOUT_WIN':'TIMEOUT_LOSS',r:fmt(pl/risk),mfeR:position.mfeR,maeR:position.maeR});
-          position=null;
-        }
+  for (let i = startIdx; i < m15.length; i++) {
+    const bar = m15[i];
+    h1Ptr = advancePointer(h1, h1Ptr, bar.time);
+    h4Ptr = advancePointer(h4, h4Ptr, bar.time);
+    dPtr = advancePointer(daily, dPtr, bar.time);
+
+    if (h1Ptr < 30 || h4Ptr < 30 || dPtr < 20) continue;
+
+    // Manage an already-open trade only with the current candle and later candles.
+    if (position) {
+      updateMFE(position, bar);
+      const age = i - position.openIndex;
+      const hitSL = position.dir === 'BUY' ? bar.low <= position.sl : bar.high >= position.sl;
+      const hitTP = position.dir === 'BUY' ? bar.high >= position.tp1 : bar.low <= position.tp1;
+
+      // Conservative OHLC assumption: if SL and TP are both hit in one candle,
+      // SL is assumed to occur first because intrabar ordering is unknown.
+      if (hitSL) {
+        trades.push({ ...position, exit: position.sl, exitTime: bar.time, result: 'LOSS', r: -1 });
+        position = null;
+        continue;
+      }
+
+      if (hitTP) {
+        const reward = Math.abs(position.tp1 - position.entry);
+        const r = position.riskDist > 0 ? reward / position.riskDist : 0;
+        trades.push({ ...position, exit: position.tp1, exitTime: bar.time, result: 'WIN', r: fmtR(r) });
+        position = null;
+        continue;
+      }
+
+      if (age >= maxHoldBars) {
+        const pl = position.dir === 'BUY'
+          ? bar.close - position.entry
+          : position.entry - bar.close;
+        const r = position.riskDist > 0 ? pl / position.riskDist : 0;
+        trades.push({
+          ...position,
+          exit: bar.close,
+          exitTime: bar.time,
+          result: r >= 0 ? 'TIMEOUT_WIN' : 'TIMEOUT_LOSS',
+          r: fmtR(r)
+        });
+        position = null;
       }
       continue;
     }
 
-    const m15Window=m15.slice(Math.max(0,i-rollingWindow+1),i+1);
-    const h1Window=h1.slice(Math.max(0,h1Ptr-rollingWindow+1),h1Ptr+1);
-    const h4Window=h4.slice(Math.max(0,h4Ptr-rollingWindow+1),h4Ptr+1);
-    const dWindow=daily.slice(Math.max(0,dPtr-rollingWindow+1),dPtr+1);
-    if(h1Window.length<30||h4Window.length<30||dWindow.length<20) continue;
+    // Same lookback logic as the live engine, but never beyond the current bar.
+    const m15Window = m15.slice(Math.max(0, i - rollingWindow + 1), i + 1);
+    const h1Window = h1.slice(Math.max(0, h1Ptr - rollingWindow + 1), h1Ptr + 1);
+    const h4Window = h4.slice(Math.max(0, h4Ptr - rollingWindow + 1), h4Ptr + 1);
+    const dWindow = daily.slice(Math.max(0, dPtr - rollingWindow + 1), dPtr + 1);
+
+    if (h1Window.length < 30 || h4Window.length < 30 || dWindow.length < 20) continue;
+
     let data;
-    try{ data={m15:engine.analyze(m15Window),h1:engine.analyze(h1Window),h4:engine.analyze(h4Window),daily:engine.analyze(dWindow)}; }catch(e){continue;}
-    const signal=engine.decide(data,engine.neutralFundamental(),engine.neutralNewsRisk(),{ignoreQuality});
-    if(signal.decision==='BUY'||signal.decision==='SELL'){
-      position={
-        dir:signal.decision, entry:bar.close, sl:signal.trade.stopLoss, tp1:signal.trade.targets[0],
-        openIndex:i,openTime:bar.time,confidence:signal.confidence,quality:signal.quality?.score??null,
-        agreeCount:signal.consensus.agreeCount,totalCount:signal.consensus.totalCount,
-        session:sessionOf(bar.time),mfeR:0,maeR:0
+    try {
+      data = {
+        m15: engine.analyze(m15Window),
+        h1: engine.analyze(h1Window),
+        h4: engine.analyze(h4Window),
+        daily: engine.analyze(dWindow)
       };
+    } catch (_) {
+      continue;
     }
+
+    let signal;
+    try {
+      signal = engine.decide(
+        data,
+        engine.neutralFundamental(),
+        engine.neutralNewsRisk(),
+        { ignoreQuality }
+      );
+    } catch (_) {
+      continue;
+    }
+
+    if (!independentActive(signal, ignoreQuality)) continue;
+    const dir = signal.decision;
+    if (!['BUY', 'SELL'].includes(dir)) continue;
+
+    if (!signal.trade || !Number.isFinite(Number(signal.trade.stopLoss)) ||
+        !Array.isArray(signal.trade.targets) || !signal.trade.targets.length) continue;
+
+    const entry = bar.close;
+    const sl = Number(signal.trade.stopLoss);
+    const tp1 = Number(signal.trade.targets[0]);
+    const riskDist = Math.abs(entry - sl);
+    if (!Number.isFinite(riskDist) || riskDist <= 0 || !Number.isFinite(tp1)) continue;
+
+    const votes = {};
+    for (const s of (signal.strategies || [])) {
+      if (!s?.name) continue;
+      votes[s.name] = s.vote || s.direction || 'NEUTRAL';
+    }
+
+    position = {
+      dir,
+      entry,
+      sl,
+      tp1,
+      openIndex: i,
+      openTime: bar.time,
+      confidence: Number(signal.confidence || 0),
+      agreeCount: Number(signal.consensus?.agreeCount || 0),
+      totalCount: Number(signal.consensus?.totalCount || 0),
+      qualityScore: signal.quality?.score ?? null,
+      qualityGrade: signal.quality?.grade ?? null,
+      session: typeof engine.getSession === 'function' ? engine.getSession(bar.time) : 'UNKNOWN',
+      rr: Number(signal.trade.rr || 0),
+      strategyVotes: votes,
+      strategyKey: signal.triggerStrategy || '',
+      strategyId: signal.triggerStrategy || null,
+      mfe: 0,
+      mae: 0,
+      riskDist
+    };
   }
-  if(position){
-    const last=m15[m15.length-1], risk=Math.abs(position.entry-position.sl);
-    const pl=position.dir==='BUY'?last.close-position.entry:position.entry-last.close;
-    const mfe=position.dir==='BUY'?(last.high-position.entry)/risk:(position.entry-last.low)/risk;
-    const mae=position.dir==='BUY'?(last.low-position.entry)/risk:(position.entry-last.high)/risk;
-    trades.push({...position,exit:last.close,exitTime:last.time,result:pl>=0?'OPEN_WIN':'OPEN_LOSS',r:fmt(pl/risk),mfeR:Math.max(position.mfeR,mfe),maeR:Math.min(position.maeR,mae)});
+
+  if (position) {
+    const lastBar = m15[m15.length - 1];
+    updateMFE(position, lastBar);
+    const pl = position.dir === 'BUY'
+      ? lastBar.close - position.entry
+      : position.entry - lastBar.close;
+    const r = position.riskDist > 0 ? pl / position.riskDist : 0;
+    trades.push({
+      ...position,
+      exit: lastBar.close,
+      exitTime: lastBar.time,
+      result: r >= 0 ? 'OPEN_WIN' : 'OPEN_LOSS',
+      r: fmtR(r)
+    });
   }
+
   return trades;
 }
 
-router.get('/data-test', async (req, res) => {
-  const tf = String(req.query.tf || '15M').toUpperCase();
-  const requested = Math.max(220, Math.min(Number(req.query.bars) || 220, 5000));
-  if (!['15M', '1H', '4H', 'DAILY'].includes(tf)) {
-    return res.json({ status: 'ERROR', error: 'invalid-timeframe', allowed: ['15M', '1H', '4H', 'Daily'] });
+function median(values) {
+  if (!values.length) return 0;
+  const x = [...values].sort((a, b) => a - b);
+  const m = Math.floor(x.length / 2);
+  return x.length % 2 ? x[m] : (x[m - 1] + x[m]) / 2;
+}
+
+function summarize(trades) {
+  const total = trades.length;
+  const wins = trades.filter(t => Number(t.r) > 0);
+  const losses = trades.filter(t => Number(t.r) < 0);
+  const breakeven = trades.filter(t => Number(t.r) === 0);
+  const netR = trades.reduce((a, t) => a + Number(t.r || 0), 0);
+  const grossProfit = wins.reduce((a, t) => a + Number(t.r || 0), 0);
+  const grossLoss = Math.abs(losses.reduce((a, t) => a + Number(t.r || 0), 0));
+
+  let peak = 0, running = 0, maxDD = 0;
+  for (const t of trades) {
+    running += Number(t.r || 0);
+    peak = Math.max(peak, running);
+    maxDD = Math.max(maxDD, peak - running);
   }
-  const engineTf = tf === 'DAILY' ? 'Daily' : tf;
+
+  const durations = trades.filter(t => Number.isFinite(t.exitTime)).map(t => (t.exitTime - t.openTime) / 3600000);
+  const mfes = trades.map(t => Number(t.mfe || 0));
+  const maes = trades.map(t => Number(t.mae || 0));
+
+  return {
+    total,
+    wins: wins.length,
+    losses: losses.length,
+    breakeven: breakeven.length,
+    winRate: total ? fmtR(wins.length / total * 100) : 0,
+    netR: fmtR(netR),
+    grossProfit: fmtR(grossProfit),
+    grossLoss: fmtR(grossLoss),
+    profitFactor: grossLoss > 0 ? fmtR(grossProfit / grossLoss) : null,
+    avgR: total ? fmtR(netR / total) : 0,
+    maxDD: fmtR(maxDD),
+    avgDurationHours: durations.length ? fmtR(durations.reduce((a, x) => a + x, 0) / durations.length) : 0,
+    medianDurationHours: durations.length ? fmtR(median(durations)) : 0,
+    avgMFE: mfes.length ? fmtR(mfes.reduce((a, x) => a + x, 0) / mfes.length) : 0,
+    medianMFE: mfes.length ? fmtR(median(mfes)) : 0,
+    avgMAE: maes.length ? fmtR(maes.reduce((a, x) => a + x, 0) / maes.length) : 0,
+    medianMAE: maes.length ? fmtR(median(maes)) : 0,
+    avgRR: total ? fmtR(trades.reduce((a, t) => a + Number(t.rr || 0), 0) / total) : 0
+  };
+}
+
+function groupBy(trades, fn) {
+  const out = {};
+  for (const t of trades) {
+    const key = fn(t);
+    (out[key] ||= []).push(t);
+  }
+  return Object.fromEntries(Object.entries(out).map(([k, v]) => [k, summarize(v)]));
+}
+
+function strategyStats(trades) {
+  const result = {};
+  for (const name of STRATEGY_NAMES) {
+    const buckets = { BUY: [], SELL: [], NEUTRAL: [] };
+    for (const t of trades) {
+      const vote = t.strategyVotes?.[name] || 'NEUTRAL';
+      if (buckets[vote]) buckets[vote].push(t);
+    }
+    result[name] = {
+      BUY: summarize(buckets.BUY),
+      SELL: summarize(buckets.SELL),
+      NEUTRAL: summarize(buckets.NEUTRAL)
+    };
+  }
+  return result;
+}
+
+function strategyCombinationStats(trades) {
+  const groups = {};
+  for (const t of trades) {
+    const key = STRATEGY_NAMES.map(name => t.strategyVotes?.[name] || 'NEUTRAL').join(' + ');
+    (groups[key] ||= []).push(t);
+  }
+  return Object.fromEntries(Object.entries(groups).map(([key, items]) => [key, {
+    ...summarize(items),
+    direction: items[0]?.dir || null,
+    sample: items.length
+  }]));
+}
+
+function consensusCompositionStats(trades) {
+  const groups = {};
+  for (const t of trades) {
+    const values = Object.values(t.strategyVotes || {});
+    const buy = values.filter(v => v === 'BUY').length;
+    const sell = values.filter(v => v === 'SELL').length;
+    const neutral = values.filter(v => v === 'NEUTRAL').length;
+    const key = `${buy} BUY / ${sell} SELL / ${neutral} NEUTRAL`;
+    (groups[key] ||= []).push(t);
+  }
+  return Object.fromEntries(Object.entries(groups).map(([key, items]) => [key, {
+    ...summarize(items),
+    sample: items.length
+  }]));
+}
+
+function cleanTrades(trades) {
+  return trades.slice(-100).map(t => ({
+    dir: t.dir,
+    entry: fmtR(t.entry),
+    sl: fmtR(t.sl),
+    tp1: fmtR(t.tp1),
+    exit: fmtR(t.exit),
+    result: t.result,
+    r: fmtR(t.r),
+    mfe: fmtR(t.mfe),
+    mae: fmtR(t.mae),
+    confidence: fmtR(t.confidence),
+    consensus: `${t.agreeCount}/${t.totalCount}`,
+    qualityScore: t.qualityScore != null ? fmtR(t.qualityScore) : null,
+    qualityGrade: t.qualityGrade,
+    session: t.session,
+    rr: fmtR(t.rr),
+    strategyId: t.strategyId,
+    strategyVotes: t.strategyVotes || {},
+    strategyKey: t.strategyKey || '',
+    openTime: new Date(t.openTime).toISOString(),
+    exitTime: new Date(t.exitTime).toISOString()
+  }));
+}
+
+router.get('/', async (req, res) => {
+  if (!process.env.TWELVEDATA_API_KEY) {
+    return res.json({ status: 'UNAVAILABLE', error: 'no-api-key-configured' });
+  }
+
+  const requestedBars = Math.max(1000, Math.min(Number(req.query.bars) || 10000, 50000));
+  const months = Math.max(1, Math.min(Number(req.query.months) || 6, 24));
+  const rollingWindow = Math.max(100, Math.min(Number(req.query.rollingWindow) || 220, 500));
+  const maxHoldDays = Math.max(1, Math.min(Number(req.query.maxHoldDays) || 3, 10));
+  const maxHoldBars = maxHoldDays * 24 * 4;
+  const mode = ['base', 'quality', 'compare'].includes(String(req.query.mode || 'compare').toLowerCase())
+    ? String(req.query.mode || 'compare').toLowerCase()
+    : 'compare';
+
+  // Extra warm-up bars are needed only so the first tested candle has enough history.
+  const fetchBars = Math.min(requestedBars + rollingWindow, 50000);
+
   try {
-    const bars = await engine.fetchTFHistory(engineTf, requested);
-    const history = typeof engine.getHistoryMeta === 'function'
-      ? engine.getHistoryMeta(engineTf)
-      : bars?.historyMeta || null;
+    const [m15, h1, h4, daily] = await Promise.all([
+      engine.fetchTFHistory('15M', fetchBars),
+      engine.fetchTFHistory('1H', Math.ceil(fetchBars / 4) + rollingWindow),
+      engine.fetchTFHistory('4H', Math.ceil(fetchBars / 16) + rollingWindow),
+      engine.fetchTFHistory('Daily', Math.ceil(fetchBars / 96) + rollingWindow)
+    ]);
+
+    const history = {
+      '15M': historyMeta('15M', m15),
+      '1H': historyMeta('1H', h1),
+      '4H': historyMeta('4H', h4),
+      'Daily': historyMeta('Daily', daily)
+    };
+
+    if (!m15 || !h1 || !h4 || !daily) {
+      return res.json({ status: 'UNAVAILABLE', error: 'market-data-unavailable', history });
+    }
+
+    if (m15.length < Math.min(fetchBars, rollingWindow + 100)) {
+      return res.json({
+        status: 'UNAVAILABLE',
+        error: 'insufficient-history-for-backtest',
+        barsReceived: m15.length,
+        requestedBars,
+        requestedHistoricalBars: fetchBars,
+        history
+      });
+    }
+
+    // The requested test sample is exactly the last requestedBars M15 candles.
+    // The preceding rollingWindow candles remain available in the fetched arrays as warm-up.
+    const testM15 = m15.slice(-requestedBars);
+
+    let baseTrades = [];
+    let qualityTrades = [];
+    if (mode === 'base' || mode === 'compare') {
+      baseTrades = simulate(testM15, h1, h4, daily, rollingWindow, maxHoldBars, 'base');
+    }
+    if (mode === 'quality' || mode === 'compare') {
+      qualityTrades = simulate(testM15, h1, h4, daily, rollingWindow, maxHoldBars, 'quality');
+    }
+
+    const baseSummary = summarize(baseTrades);
+    const qualitySummary = summarize(qualityTrades);
+    const selectedTrades = mode === 'base' ? baseTrades : qualityTrades;
+    const selectedStats = mode === 'base' ? baseSummary : qualitySummary;
+
+    const comparison = {
+      baseTrades: baseSummary.total,
+      qualityTrades: qualitySummary.total,
+      retention: baseSummary.total ? fmtR(qualitySummary.total / baseSummary.total * 100) : 0,
+      filtered: Math.max(0, baseSummary.total - qualitySummary.total),
+      netRDelta: fmtR(qualitySummary.netR - baseSummary.netR),
+      winRateDelta: fmtR(qualitySummary.winRate - baseSummary.winRate),
+      profitFactorDelta: qualitySummary.profitFactor != null && baseSummary.profitFactor != null
+        ? fmtR(qualitySummary.profitFactor - baseSummary.profitFactor) : null,
+      avgRDelta: fmtR(qualitySummary.avgR - baseSummary.avgR),
+      maxDDDelta: fmtR(qualitySummary.maxDD - baseSummary.maxDD),
+      avgMFEDelta: fmtR(qualitySummary.avgMFE - baseSummary.avgMFE),
+      avgMAEDelta: fmtR(qualitySummary.avgMAE - baseSummary.avgMAE)
+    };
+
+    const firstTime = testM15[0]?.time || null;
+    const lastTime = testM15[testM15.length - 1]?.time || null;
+    const actualMonths = firstTime && lastTime
+      ? (lastTime - firstTime) / (1000 * 60 * 60 * 24 * 30.4375)
+      : 0;
+
     return res.json({
-      status: bars && bars.length ? 'OK' : 'ERROR',
-      timeframe: engineTf,
-      symbol: engine.SYMBOL,
-      requested,
-      returned: bars?.length || 0,
-      history,
-      sample: bars?.slice(-5).map(b => ({
-        time: new Date(b.time).toISOString(), open: b.open, high: b.high, low: b.low, close: b.close, volume: b.volume
-      })) || []
+      ok: true,
+      status: 'LIVE',
+      mode,
+      architecture: 'INDEPENDENT_STRATEGIES',
+      disclaimer: 'بک‌تست روی داده تاریخی واقعی TwelveData اجرا شده است. هر استراتژی به‌صورت مستقل بررسی می‌شود و اجماع وزنی شرط ورود نیست. در نسخه فعلی فقط Trend Following اجازه فعال‌کردن معامله را دارد و سایر استراتژی‌ها diagnostics هستند. FRED و News در تاریخ خنثی فرض شده‌اند؛ ورود روی Close کندل سیگنال انجام شده؛ Spread/Commission/Slippage مدل نشده‌اند؛ MFE/MAE فقط از کندل‌های بعد از ورود محاسبه می‌شوند.',
+      period: {
+        from: firstTime ? new Date(firstTime).toISOString() : null,
+        to: lastTime ? new Date(lastTime).toISOString() : null,
+        requestedBars,
+        barsAnalyzed: testM15.length,
+        monthsRequested: months,
+        actualMonths: fmtR(actualMonths)
+      },
+      parameters: {
+        rollingWindow,
+        maxHoldDays,
+        maxHoldBars,
+        minConfidence: engine.MIN_CONFIDENCE,
+        minRR: engine.MIN_RR
+      },
+      stats: selectedStats,
+      baseStats: baseSummary,
+      qualityStats: qualitySummary,
+      comparison,
+      direction: groupBy(selectedTrades, t => t.dir),
+      sessions: groupBy(selectedTrades, t => t.session || 'UNKNOWN'),
+      confidence: groupBy(selectedTrades, t => {
+        const c = Number(t.confidence || 0);
+        if (c < 70) return '<70';
+        if (c < 80) return '70-79';
+        if (c < 90) return '80-89';
+        return '90-100';
+      }),
+      quality: groupBy(selectedTrades, t => {
+        const q = Number(t.qualityScore || 0);
+        if (q < 65) return '<65';
+        if (q < 75) return '65-74';
+        if (q < 85) return '75-84';
+        return '85-100';
+      }),
+      rr: groupBy(selectedTrades, t => {
+        const rr = Number(t.rr || 0);
+        if (rr < 1.5) return '<1.5';
+        if (rr < 2) return '1.5-1.99';
+        if (rr < 3) return '2-2.99';
+        return '3+';
+      }),
+      strategyStats: strategyStats(selectedTrades),
+      strategyCombinations: strategyCombinationStats(selectedTrades),
+      consensusComposition: consensusCompositionStats(selectedTrades),
+      trades: cleanTrades(selectedTrades),
+      diagnostics: {
+        baseTradeCount: baseTrades.length,
+        qualityTradeCount: qualityTrades.length,
+        qualityRetention: comparison.retention,
+        qualityFiltered: comparison.filtered,
+        historicalBarsReturned: m15.length,
+        requestedHistoricalBars: fetchBars,
+        testBars: testM15.length,
+        strategyCount: 7,
+        independentArchitecture: true,
+        activeStrategyEngines: ['TREND_FOLLOWING'],
+        diagnosticOnlyStrategies: ['STRUCTURE', 'LIQUIDITY_SWEEP', 'MOMENTUM', 'FIBONACCI', 'RSI_DIVERGENCE', 'FUNDAMENTAL'],
+        history
+      }
     });
   } catch (e) {
-    return res.json({ status: 'ERROR', error: 'data-test-exception: ' + e.message, timeframe: engineTf });
+    console.error('[backtest]', e);
+    return res.json({ status: 'UNAVAILABLE', error: 'backtest-exception: ' + e.message });
   }
 });
 
-router.get('/',async(req,res)=>{
-  if(!process.env.TWELVEDATA_API_KEY) return res.json({status:'UNAVAILABLE',error:'no-api-key-configured'});
-  const months=Math.max(1,Math.min(Number(req.query.months)||6,24));
-  const requestedBars=Number(req.query.bars)||Math.round(months*30.44*24*4);
-  const m15Bars=Math.max(1000,Math.min(requestedBars,50000));
-  const rollingWindow=220;
-  const maxHoldDays=Math.max(1,Math.min(Number(req.query.maxHoldDays)||3,10));
-  const maxHoldBars=maxHoldDays*96;
-  const mode=String(req.query.mode||'quality').toLowerCase();
-  try{
-    const [m15,h1,h4,daily]=await Promise.all([
-      engine.fetchTFHistory('15M',m15Bars+rollingWindow),
-      engine.fetchTFHistory('1H',Math.ceil((m15Bars+rollingWindow)/4)+rollingWindow),
-      engine.fetchTFHistory('4H',Math.ceil((m15Bars+rollingWindow)/16)+rollingWindow),
-      engine.fetchTFHistory('Daily',Math.ceil((m15Bars+rollingWindow)/96)+rollingWindow)
-    ]);
-    if(!m15||!h1||!h4||!daily) return res.json({status:'UNAVAILABLE',error:'market-data-unavailable',history:{m15:engine.getHistoryMeta?.('15M')||null,h1:engine.getHistoryMeta?.('1H')||null,h4:engine.getHistoryMeta?.('4H')||null,daily:engine.getHistoryMeta?.('Daily')||null}});
-    if(m15.length<rollingWindow+50) return res.json({status:'UNAVAILABLE',error:'insufficient-history-for-backtest'});
-
-    const qualityTrades=simulate(m15,h1,h4,daily,rollingWindow,maxHoldBars,false);
-    const baseTrades=mode==='compare'?simulate(m15,h1,h4,daily,rollingWindow,maxHoldBars,true):null;
-    const trades=mode==='base'?simulate(m15,h1,h4,daily,rollingWindow,maxHoldBars,true):qualityTrades;
-    const stats=tradeStats(trades);
-    const result={status:'LIVE',mode,config:{requestedBars:m15Bars,rollingWindow,maxHoldDays,maxHoldBars,minConfidence:engine.MIN_CONFIDENCE,minRR:engine.MIN_RR,minQualityScore:Number(process.env.MIN_QUALITY_SCORE||65)},
-      history:{m15:m15.historyMeta||null,h1:h1.historyMeta||null,h4:h4.historyMeta||null,daily:daily.historyMeta||null},
-      period:{from:new Date(m15[Math.max(rollingWindow,100)].time).toISOString(),to:new Date(m15[m15.length-1].time).toISOString(),requestedBars:m15Bars,barsAvailable:m15.length,barsAnalyzed:m15.length-Math.max(rollingWindow,100),providerLimited:!!m15.historyMeta?.providerLimited},
-      stats,
-      diagnostics:{direction:groupStats(trades,t=>t.dir),session:groupStats(trades,t=>t.session),confidenceBand:groupStats(trades,t=>t.confidence<80?'70-79':t.confidence<90?'80-89':'90-96'),qualityBand:groupStats(trades,t=>t.quality==null?'NA':t.quality<65?'0-64':t.quality<75?'65-74':t.quality<85?'75-84':'85-100'),history:{m15:m15.historyMeta||null,h1:h1.historyMeta||null,h4:h4.historyMeta||null,daily:daily.historyMeta||null}},
-      trades:trades.slice(-100).map(t=>({dir:t.dir,entry:fmt(t.entry),sl:fmt(t.sl),tp1:fmt(t.tp1),exit:fmt(t.exit),r:t.r,result:t.result,mfeR:fmt(t.mfeR),maeR:fmt(t.maeR),confidence:fmt(t.confidence),quality:t.quality,consensus:`${t.agreeCount}/${t.totalCount}`,session:t.session,openTime:new Date(t.openTime).toISOString(),exitTime:new Date(t.exitTime).toISOString()})),
-      disclaimer:'بک‌تست روی داده تاریخی واقعی بازار اجرا شده است. فاندامنتال و خبر تاریخی لحظه‌به‌لحظه خنثی‌اند؛ ورود روی Close کندل سیگنال شبیه‌سازی شده؛ اسپرد/کمیسیون/Slippage مدل نشده؛ MFE/MAE فقط از کندل‌های بعد از ورود محاسبه می‌شوند. نتایج برای اعتبارسنجی خارج از نمونه تضمین‌کننده نیستند.'
-    };
-    if(baseTrades){
-      const baseStats=tradeStats(baseTrades); const qKeys=new Set(qualityTrades.map(t=>`${t.openTime}|${t.dir}`));
-      const retained=baseTrades.filter(t=>qKeys.has(`${t.openTime}|${t.dir}`)).length;
-      result.compare={base:baseStats,quality:stats,retained,filtered:baseTrades.length-retained,retentionRate:baseTrades.length?fmt(retained/baseTrades.length*100):0,deltaNetR:fmt(stats.netR-baseStats.netR),deltaPF:(stats.profitFactor!=null&&baseStats.profitFactor!=null)?fmt(stats.profitFactor-baseStats.profitFactor):null};
-    }
-    res.json(result);
-  }catch(e){res.json({status:'UNAVAILABLE',error:'backtest-exception: '+e.message});}
-});
-
-module.exports=router;
+module.exports = router;
