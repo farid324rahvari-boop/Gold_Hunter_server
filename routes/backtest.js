@@ -25,7 +25,10 @@ function advancePointer(bars, ptr, targetTime) {
 router.get('/', async (req, res) => {
   if (!process.env.TWELVEDATA_API_KEY) return res.json({ status: 'UNAVAILABLE', error: 'no-api-key-configured' });
 
-  const m15Bars = Math.min(Number(req.query.bars) || 1500, 3000); // پیش‌فرض ~۱۵ روز کندل ۱۵دقیقه‌ای
+  const months = Math.max(1, Math.min(Number(req.query.months) || 6, 12));
+  // برای 5M/15M بک‌تست بزرگ، تعداد کندل‌ها از ماه محاسبه می‌شود؛
+  // پارامتر bars هم برای کنترل مستقیم تعداد کندل‌ها باقی مانده است.
+  const m15Bars = Math.min(Number(req.query.bars) || Math.round(months * 30.44 * 24 * 4), 50000); // پیش‌فرض ۶ ماه ≈ 17.5k کندل 15M
   const rollingWindow = 220; // همان اندازه‌ای که سیگنال زنده استفاده می‌کند
   // حداکثر نگه‌داری معامله باز — پیش‌فرض ۳ روز (به‌جای ۱ روز قبلی) چون اکثر معاملات با سقف ۱روزه
   // به‌جای برخورد تمیز به SL/TP، با Timeout بسته می‌شدند؛ با ?maxHoldDays= قابل‌تنظیم است.
@@ -33,10 +36,10 @@ router.get('/', async (req, res) => {
 
   try {
     const [m15, h1, h4, daily] = await Promise.all([
-      engine.fetchTF('15M', m15Bars + rollingWindow),
-      engine.fetchTF('1H', Math.ceil((m15Bars + rollingWindow) / 4) + rollingWindow),
-      engine.fetchTF('4H', Math.ceil((m15Bars + rollingWindow) / 16) + rollingWindow),
-      engine.fetchTF('Daily', Math.ceil((m15Bars + rollingWindow) / 96) + rollingWindow)
+      engine.fetchTFHistory('15M', m15Bars + rollingWindow),
+      engine.fetchTFHistory('1H', Math.ceil((m15Bars + rollingWindow) / 4) + rollingWindow),
+      engine.fetchTFHistory('4H', Math.ceil((m15Bars + rollingWindow) / 16) + rollingWindow),
+      engine.fetchTFHistory('Daily', Math.ceil((m15Bars + rollingWindow) / 96) + rollingWindow)
     ]);
     if (!m15 || !h1 || !h4 || !daily) return res.json({ status: 'UNAVAILABLE', error: 'market-data-unavailable' });
     if (m15.length < rollingWindow + 50) return res.json({ status: 'UNAVAILABLE', error: 'insufficient-history-for-backtest' });
@@ -113,7 +116,7 @@ router.get('/', async (req, res) => {
 
     res.json({
       status: 'LIVE',
-      disclaimer: 'بک‌تست روی داده واقعی تاریخی اجرا شده، اما فاندامنتال/ریسک خبری در این بازه خنثی فرض شده‌اند، ورود دقیقاً با قیمت کندل سیگنال (نه محدوده پیشنهادی) شبیه‌سازی شده، و اسپرد/کمیسیون مدل نشده است — نتیجه واقعی معمولاً کمی ضعیف‌تر از این عدد است.',
+      disclaimer: 'بک‌تست روی داده واقعی تاریخی اجرا شده؛ فاندامنتال/ریسک خبری در این بازه خنثی فرض شده‌اند، ورود با قیمت بسته‌شدن کندل سیگنال شبیه‌سازی شده و اسپرد/کمیسیون مدل نشده است. برای بازه‌های بزرگ، داده‌های TwelveData به‌صورت chunk شده دریافت می‌شوند.',
       period: { from: new Date(m15[startIdx]?.time || 0).toISOString(), to: new Date(m15[m15.length - 1].time).toISOString(), barsAnalyzed: m15.length - startIdx },
       stats: {
         totalTrades: trades.length, winRate: trades.length ? fmtR((wins.length / trades.length) * 100) : 0,
