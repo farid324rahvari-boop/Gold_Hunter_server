@@ -13,21 +13,13 @@ const express = require('express');
 
 const router = express.Router();
 
-const engine =
-  require('../lib/engine');
+const engine = require('../lib/engine');
 
 function fmtR(x) {
-  return Number(
-    Number(x).toFixed(3)
-  );
+  return Number(Number(x).toFixed(3));
 }
 
-function advancePointer(
-  bars,
-  ptr,
-  targetTime
-) {
-
+function advancePointer(bars, ptr, targetTime) {
   while (
     ptr + 1 < bars.length &&
     bars[ptr + 1].time <= targetTime
@@ -38,14 +30,21 @@ function advancePointer(
   return ptr;
 }
 
-function getBaseActive(
-  signal
-) {
-
+/*
+ * BASE
+ *
+ * فقط فیلترهای اصلی موتور:
+ * - direction
+ * - confidence
+ * - consensus
+ * - original blockers
+ *
+ * Quality score و quality decision در Base دخالت ندارند.
+ */
+function getBaseActive(signal) {
   if (
     !signal ||
-    !signal.direction ||
-    signal.direction === 'WAIT'
+    !['BUY', 'SELL'].includes(signal.direction)
   ) {
     return false;
   }
@@ -67,7 +66,7 @@ function getBaseActive(
   }
 
   /*
-   * فقط blockerهای اصلی.
+   * فقط blockerهای اصلی موتور.
    * Quality blocker در Base نادیده گرفته می‌شود.
    */
   if (
@@ -77,18 +76,17 @@ function getBaseActive(
     return false;
   }
 
-  return (
-    signal.decision ===
-      'BUY' ||
-    signal.decision ===
-      'SELL'
-  );
+  return true;
 }
 
-function getQualityActive(
-  signal
-) {
-
+/*
+ * QUALITY
+ *
+ * تصمیم نهایی موتور باید BUY/SELL باشد.
+ * یعنی Quality Filter نیز قبلاً در engine.decide()
+ * اعمال شده است.
+ */
+function getQualityActive(signal) {
   return (
     signal &&
     (
@@ -107,7 +105,6 @@ function simulate(
   maxHoldBars,
   mode
 ) {
-
   let h1Ptr = 0;
   let h4Ptr = 0;
   let dPtr = 0;
@@ -116,41 +113,35 @@ function simulate(
 
   let position = null;
 
-  const startIdx =
-    Math.max(
-      rollingWindow,
-      100
-    );
+  const startIdx = Math.max(
+    rollingWindow,
+    100
+  );
 
   for (
     let i = startIdx;
     i < m15.length;
     i++
   ) {
+    const bar = m15[i];
 
-    const bar =
-      m15[i];
+    h1Ptr = advancePointer(
+      h1,
+      h1Ptr,
+      bar.time
+    );
 
-    h1Ptr =
-      advancePointer(
-        h1,
-        h1Ptr,
-        bar.time
-      );
+    h4Ptr = advancePointer(
+      h4,
+      h4Ptr,
+      bar.time
+    );
 
-    h4Ptr =
-      advancePointer(
-        h4,
-        h4Ptr,
-        bar.time
-      );
-
-    dPtr =
-      advancePointer(
-        daily,
-        dPtr,
-        bar.time
-      );
+    dPtr = advancePointer(
+      daily,
+      dPtr,
+      bar.time
+    );
 
     if (
       h1Ptr <
@@ -168,11 +159,9 @@ function simulate(
     }
 
     /*
-     * اگر معامله باز است،
-     * ابتدا خروج را بررسی می‌کنیم.
+     * معامله باز
      */
     if (position) {
-
       const age =
         i - position.openIndex;
 
@@ -187,11 +176,10 @@ function simulate(
           : bar.low <= position.tp1;
 
       /*
-       * SL اولویت دارد اگر
-       * SL و TP در یک کندل هر دو لمس شوند.
+       * اگر SL و TP داخل یک کندل
+       * هر دو لمس شوند، SL اولویت دارد.
        */
       if (hitSL) {
-
         const exit =
           position.sl;
 
@@ -204,15 +192,9 @@ function simulate(
 
         trades.push({
           ...position,
-
           exit,
-
-          exitTime:
-            bar.time,
-
-          result:
-            'LOSS',
-
+          exitTime: bar.time,
+          result: 'LOSS',
           r
         });
 
@@ -222,7 +204,6 @@ function simulate(
       }
 
       if (hitTP) {
-
         const exit =
           position.tp1;
 
@@ -239,8 +220,9 @@ function simulate(
           );
 
         const r =
-          rewardDist /
-          riskDist;
+          riskDist > 0
+            ? rewardDist / riskDist
+            : 0;
 
         updateMFE(
           position,
@@ -249,17 +231,10 @@ function simulate(
 
         trades.push({
           ...position,
-
           exit,
-
-          exitTime:
-            bar.time,
-
-          result:
-            'WIN',
-
-          r:
-            fmtR(r)
+          exitTime: bar.time,
+          result: 'WIN',
+          r: fmtR(r)
         });
 
         position = null;
@@ -269,14 +244,10 @@ function simulate(
 
       /*
        * حداکثر زمان نگهداری
-       *
-       * دقیقاً روی آخرین کندل مجاز
-       * معامله را می‌بندیم.
        */
       if (
         age >= maxHoldBars
       ) {
-
         updateMFE(
           position,
           bar
@@ -323,10 +294,6 @@ function simulate(
         continue;
       }
 
-      /*
-       * تا وقتی معامله باز است،
-       * سیگنال جدید نمی‌گیریم.
-       */
       updateMFE(
         position,
         bar
@@ -336,7 +303,7 @@ function simulate(
     }
 
     /*
-     * ساخت پنجره تاریخی
+     * پنجره تاریخی
      */
     const m15Window =
       m15.slice(
@@ -393,9 +360,7 @@ function simulate(
     let data;
 
     try {
-
       data = {
-
         m15:
           engine.analyze(
             m15Window
@@ -416,14 +381,12 @@ function simulate(
             dWindow
           )
       };
-
     } catch (e) {
       continue;
     }
 
     /*
-     * در بک‌تست:
-     * Fundamental و News خنثی هستند.
+     * Fundamental و News در بک‌تست خنثی هستند.
      */
     const signal =
       engine.decide(
@@ -434,26 +397,46 @@ function simulate(
 
     const active =
       mode === 'quality'
-        ? getQualityActive(
-            signal
-          )
-        : getBaseActive(
-            signal
-          );
+        ? getQualityActive(signal)
+        : getBaseActive(signal);
 
     if (!active) {
       continue;
     }
 
     /*
-     * ورود روی Close همان کندلی
-     * که سیگنال صادر شده است.
+     * BASE ممکن است decision=WAIT داشته باشد
+     * ولی direction آن BUY/SELL باشد.
+     *
+     * بنابراین برای Base از direction استفاده می‌کنیم.
+     * برای Quality از decision.
      */
     const dir =
-      signal.decision;
+      mode === 'quality'
+        ? signal.decision
+        : signal.direction;
+
+    if (
+      !['BUY', 'SELL'].includes(dir)
+    ) {
+      continue;
+    }
 
     const entry =
       bar.close;
+
+    if (
+      !signal.trade ||
+      !Number.isFinite(
+        Number(signal.trade.stopLoss)
+      ) ||
+      !Array.isArray(
+        signal.trade.targets
+      ) ||
+      !signal.trade.targets.length
+    ) {
+      continue;
+    }
 
     const sl =
       Number(
@@ -472,13 +455,13 @@ function simulate(
 
     if (
       !Number.isFinite(riskDist) ||
-      riskDist <= 0
+      riskDist <= 0 ||
+      !Number.isFinite(tp1)
     ) {
       continue;
     }
 
     position = {
-
       dir,
 
       entry,
@@ -494,13 +477,19 @@ function simulate(
         bar.time,
 
       confidence:
-        signal.confidence,
+        Number(
+          signal.confidence || 0
+        ),
 
       agreeCount:
-        signal.consensus.agreeCount,
+        Number(
+          signal.consensus?.agreeCount || 0
+        ),
 
       totalCount:
-        signal.consensus.totalCount,
+        Number(
+          signal.consensus?.totalCount || 0
+        ),
 
       qualityScore:
         signal.quality?.score ??
@@ -517,20 +506,19 @@ function simulate(
         ),
 
       rr:
-        signal.trade.rr,
+        Number(
+          signal.trade.rr || 0
+        ),
 
-      mfe:
-        0,
+      mfe: 0,
 
-      mae:
-        0,
+      mae: 0,
 
       riskDist
     };
 
     /*
-     * Entry candle عمداً در MFE/MAE
-     * لحاظ نمی‌شود.
+     * Entry candle در MFE/MAE لحاظ نمی‌شود.
      */
   }
 
@@ -539,7 +527,6 @@ function simulate(
    * با آخرین Close بسته می‌شود.
    */
   if (position) {
-
     const lastBar =
       m15[m15.length - 1];
 
@@ -567,7 +554,6 @@ function simulate(
         : 0;
 
     trades.push({
-
       ...position,
 
       exit:
@@ -593,7 +579,6 @@ function updateMFE(
   position,
   bar
 ) {
-
   if (
     !position ||
     !bar ||
@@ -606,15 +591,18 @@ function updateMFE(
   if (
     position.dir === 'BUY'
   ) {
-
     const mfe =
-      (bar.high -
-        position.entry) /
+      (
+        bar.high -
+        position.entry
+      ) /
       position.riskDist;
 
     const mae =
-      (bar.low -
-        position.entry) /
+      (
+        bar.low -
+        position.entry
+      ) /
       position.riskDist;
 
     position.mfe =
@@ -628,19 +616,19 @@ function updateMFE(
         position.mae || 0,
         mae
       );
-
-  }
-
-  else {
-
+  } else {
     const mfe =
-      (position.entry -
-        bar.low) /
+      (
+        position.entry -
+        bar.low
+      ) /
       position.riskDist;
 
     const mae =
-      (position.entry -
-        bar.high) /
+      (
+        position.entry -
+        bar.high
+      ) /
       position.riskDist;
 
     position.mfe =
@@ -658,16 +646,14 @@ function updateMFE(
 }
 
 function median(values) {
-
   if (!values.length) {
     return 0;
   }
 
   const x =
-    [...values]
-      .sort(
-        (a, b) => a - b
-      );
+    [...values].sort(
+      (a, b) => a - b
+    );
 
   const mid =
     Math.floor(
@@ -676,25 +662,24 @@ function median(values) {
 
   return x.length % 2
     ? x[mid]
-    : (x[mid - 1] +
-       x[mid]) / 2;
+    : (
+        x[mid - 1] +
+        x[mid]
+      ) / 2;
 }
 
-function summarize(
-  trades
-) {
-
+function summarize(trades) {
   const total =
     trades.length;
 
   const wins =
     trades.filter(
-      t => t.r > 0
+      t => Number(t.r) > 0
     );
 
   const losses =
     trades.filter(
-      t => t.r <= 0
+      t => Number(t.r) <= 0
     );
 
   const netR =
@@ -725,7 +710,6 @@ function summarize(
   let maxDD = 0;
 
   trades.forEach(t => {
-
     running +=
       Number(t.r || 0);
 
@@ -762,7 +746,6 @@ function summarize(
     );
 
   return {
-
     total,
 
     wins:
@@ -773,7 +756,8 @@ function summarize(
 
     breakeven:
       trades.filter(
-        t => Number(t.r) === 0
+        t =>
+          Number(t.r) === 0
       ).length,
 
     winRate:
@@ -886,11 +870,9 @@ function groupBy(
   trades,
   fn
 ) {
-
   const out = {};
 
   for (const t of trades) {
-
     const key =
       fn(t);
 
@@ -907,7 +889,6 @@ function groupBy(
     const [key, items]
     of Object.entries(out)
   ) {
-
     result[key] =
       summarize(items);
   }
@@ -918,7 +899,6 @@ function groupBy(
 function directionStats(
   trades
 ) {
-
   return groupBy(
     trades,
     t => t.dir
@@ -928,7 +908,6 @@ function directionStats(
 function sessionStats(
   trades
 ) {
-
   return groupBy(
     trades,
     t =>
@@ -942,11 +921,9 @@ function sessionStats(
 function confidenceStats(
   trades
 ) {
-
   return groupBy(
     trades,
     t => {
-
       const c =
         Number(
           t.confidence || 0
@@ -969,14 +946,16 @@ function confidenceStats(
   );
 }
 
-function qualityStats(
+/*
+ * اسم تابع تغییر کرد تا با
+ * qualitySummary تداخل نداشته باشد.
+ */
+function qualityBucketStats(
   trades
 ) {
-
   return groupBy(
     trades,
     t => {
-
       const q =
         Number(
           t.qualityScore || 0
@@ -1002,11 +981,9 @@ function qualityStats(
 function rrStats(
   trades
 ) {
-
   return groupBy(
     trades,
     t => {
-
       const rr =
         Number(
           t.rr || 0
@@ -1032,11 +1009,9 @@ function rrStats(
 function cleanTrades(
   trades
 ) {
-
   return trades
     .slice(-50)
     .map(t => ({
-
       dir:
         t.dir,
 
@@ -1099,11 +1074,9 @@ function cleanTrades(
 router.get(
   '/',
   async (req, res) => {
-
     if (
       !process.env.TWELVEDATA_API_KEY
     ) {
-
       return res.json({
         status:
           'UNAVAILABLE',
@@ -1176,11 +1149,6 @@ router.get(
           )
         : 'compare';
 
-    /*
-     * bars + rollingWindow
-     * برای اینکه ابتدای بک‌تست
-     * هم داده کافی برای اندیکاتورها داشته باشد.
-     */
     const fetchBars =
       Math.min(
         requestedBars +
@@ -1189,7 +1157,6 @@ router.get(
       );
 
     try {
-
       const [
         m15,
         h1,
@@ -1197,7 +1164,6 @@ router.get(
         daily
       ] =
         await Promise.all([
-
           engine.fetchTFHistory(
             '15M',
             fetchBars
@@ -1234,7 +1200,6 @@ router.get(
         !h4 ||
         !daily
       ) {
-
         return res.json({
           status:
             'UNAVAILABLE',
@@ -1248,7 +1213,6 @@ router.get(
         m15.length <
         rollingWindow + 100
       ) {
-
         return res.json({
           status:
             'UNAVAILABLE',
@@ -1261,10 +1225,6 @@ router.get(
         });
       }
 
-      /*
-       * فقط requestedBars آخر را
-       * برای تحلیل استفاده می‌کنیم.
-       */
       const startCut =
         Math.max(
           0,
@@ -1275,9 +1235,6 @@ router.get(
       const testM15 =
         m15.slice(startCut);
 
-      /*
-       * اجرای Base و Quality
-       */
       let baseTrades = [];
       let qualityTrades = [];
 
@@ -1285,7 +1242,6 @@ router.get(
         mode === 'base' ||
         mode === 'compare'
       ) {
-
         baseTrades =
           simulate(
             testM15,
@@ -1302,7 +1258,6 @@ router.get(
         mode === 'quality' ||
         mode === 'compare'
       ) {
-
         qualityTrades =
           simulate(
             testM15,
@@ -1315,29 +1270,28 @@ router.get(
           );
       }
 
-      const baseStats =
+      const baseSummary =
         summarize(
           baseTrades
         );
 
-      const qualityStats =
+      const qualitySummary =
         summarize(
           qualityTrades
         );
 
       const comparison = {
-
         baseTrades:
-          baseStats.total,
+          baseSummary.total,
 
         qualityTrades:
-          qualityStats.total,
+          qualitySummary.total,
 
         retention:
-          baseStats.total
+          baseSummary.total
             ? fmtR(
-                qualityStats.total /
-                baseStats.total *
+                qualitySummary.total /
+                baseSummary.total *
                 100
               )
             : 0,
@@ -1345,80 +1299,69 @@ router.get(
         filtered:
           Math.max(
             0,
-            baseStats.total -
-              qualityStats.total
+            baseSummary.total -
+              qualitySummary.total
           ),
 
         netRDelta:
           fmtR(
-            qualityStats.netR -
-            baseStats.netR
+            qualitySummary.netR -
+            baseSummary.netR
           ),
 
         winRateDelta:
           fmtR(
-            qualityStats.winRate -
-            baseStats.winRate
+            qualitySummary.winRate -
+            baseSummary.winRate
           ),
 
         profitFactorDelta:
           (
-            qualityStats.profitFactor != null &&
-            baseStats.profitFactor != null
+            qualitySummary.profitFactor != null &&
+            baseSummary.profitFactor != null
           )
             ? fmtR(
-                qualityStats.profitFactor -
-                baseStats.profitFactor
+                qualitySummary.profitFactor -
+                baseSummary.profitFactor
               )
             : null,
 
         avgRDelta:
           fmtR(
-            qualityStats.avgR -
-            baseStats.avgR
+            qualitySummary.avgR -
+            baseSummary.avgR
           ),
 
         maxDDDelta:
           fmtR(
-            qualityStats.maxDD -
-            baseStats.maxDD
+            qualitySummary.maxDD -
+            baseSummary.maxDD
           ),
 
         avgMFEDelta:
           fmtR(
-            qualityStats.avgMFE -
-            baseStats.avgMFE
+            qualitySummary.avgMFE -
+            baseSummary.avgMFE
           ),
 
         avgMAEDelta:
           fmtR(
-            qualityStats.avgMAE -
-            baseStats.avgMAE
+            qualitySummary.avgMAE -
+            baseSummary.avgMAE
           )
       };
 
-      let selectedTrades =
+      const selectedTrades =
         mode === 'base'
           ? baseTrades
-          : mode === 'quality'
-            ? qualityTrades
-            : qualityTrades;
+          : qualityTrades;
 
       const selectedStats =
         mode === 'base'
-          ? baseStats
-          : mode === 'quality'
-            ? qualityStats
-            : qualityStats;
+          ? baseSummary
+          : qualitySummary;
 
-      /*
-       * ماه‌ها را فعلاً به‌عنوان
-       * metadata گزارش می‌کنیم.
-       * محدودیت اصلی داده واقعی
-       * تعداد کندل دریافتی است.
-       */
       const period = {
-
         from:
           new Date(
             testM15[0]?.time || 0
@@ -1441,7 +1384,6 @@ router.get(
       };
 
       return res.json({
-
         ok: true,
 
         status:
@@ -1455,7 +1397,6 @@ router.get(
         period,
 
         parameters: {
-
           rollingWindow,
 
           maxHoldDays,
@@ -1475,9 +1416,11 @@ router.get(
         stats:
           selectedStats,
 
-        baseStats,
+        baseStats:
+          baseSummary,
 
-        qualityStats,
+        qualityStats:
+          qualitySummary,
 
         comparison,
 
@@ -1497,7 +1440,7 @@ router.get(
           ),
 
         quality:
-          qualityStats(
+          qualityBucketStats(
             selectedTrades
           ),
 
@@ -1512,7 +1455,6 @@ router.get(
           ),
 
         diagnostics: {
-
           baseTradeCount:
             baseTrades.length,
 
@@ -1534,14 +1476,12 @@ router.get(
       });
 
     } catch (e) {
-
       console.error(
         '[backtest]',
         e
       );
 
       return res.json({
-
         status:
           'UNAVAILABLE',
 
