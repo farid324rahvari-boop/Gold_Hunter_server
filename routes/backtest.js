@@ -10,6 +10,7 @@
 // - MFE / MAE از بعد ورود تا خروج
 // - Strategy diagnostics فعال
 // - Base و Quality به صورت جداگانه اجرا می‌شوند
+// - Historical pagination diagnostics فعال
 
 const express = require('express');
 
@@ -747,7 +748,13 @@ function summarize(
   const losses =
     trades.filter(
       t =>
-        Number(t.r) <= 0
+        Number(t.r) < 0
+    );
+
+  const breakeven =
+    trades.filter(
+      t =>
+        Number(t.r) === 0
     );
 
   const netR =
@@ -843,10 +850,7 @@ function summarize(
       losses.length,
 
     breakeven:
-      trades.filter(
-        t =>
-          Number(t.r) === 0
-      ).length,
+      breakeven.length,
 
     winRate:
       total
@@ -1508,6 +1512,43 @@ router.get(
           )
         ]);
 
+      /*
+       * اطلاعات مربوط به pagination تاریخچه
+       *
+       * این قسمت وابسته به getHistoryMeta
+       * در engine.js است.
+       *
+       * اگر engine قدیمی باشد و این تابع را
+       * نداشته باشد، بک‌تست همچنان اجرا می‌شود.
+       */
+      const getHistoryMeta =
+        typeof engine.getHistoryMeta ===
+        'function'
+          ? engine.getHistoryMeta
+          : () => null;
+
+      const history = {
+        '15M':
+          getHistoryMeta(
+            '15M'
+          ),
+
+        '1H':
+          getHistoryMeta(
+            '1H'
+          ),
+
+        '4H':
+          getHistoryMeta(
+            '4H'
+          ),
+
+        'Daily':
+          getHistoryMeta(
+            'Daily'
+          )
+      };
+
       if (
         !m15 ||
         !h1 ||
@@ -1519,7 +1560,9 @@ router.get(
             'UNAVAILABLE',
 
           error:
-            'market-data-unavailable'
+            'market-data-unavailable',
+
+          history
         });
       }
 
@@ -1535,7 +1578,11 @@ router.get(
             'insufficient-history-for-backtest',
 
           barsReceived:
-            m15.length
+            m15.length,
+
+          requestedBars,
+
+          history
         });
       }
 
@@ -1679,19 +1726,48 @@ router.get(
           ? baseSummary
           : qualitySummary;
 
+      const firstTime =
+        testM15[0]?.time ||
+        null;
+
+      const lastTime =
+        testM15[
+          testM15.length - 1
+        ]?.time ||
+        null;
+
+      const actualMonths =
+        firstTime &&
+        lastTime
+          ? (
+              (
+                lastTime -
+                firstTime
+              ) /
+              (
+                1000 *
+                60 *
+                60 *
+                24 *
+                30.4375
+              )
+            )
+          : 0;
+
       const period = {
         from:
-          new Date(
-            testM15[0]?.time ||
-            0
-          ).toISOString(),
+          firstTime
+            ? new Date(
+                firstTime
+              ).toISOString()
+            : null,
 
         to:
-          new Date(
-            testM15[
-              testM15.length - 1
-            ].time
-          ).toISOString(),
+          lastTime
+            ? new Date(
+                lastTime
+              ).toISOString()
+            : null,
 
         requestedBars,
 
@@ -1699,7 +1775,10 @@ router.get(
           testM15.length,
 
         monthsRequested:
-          months
+          months,
+
+        actualMonths:
+          fmtR(actualMonths)
       };
 
       return res.json({
@@ -1712,7 +1791,7 @@ router.get(
         mode,
 
         disclaimer:
-          'بک‌تست روی داده تاریخی واقعی TwelveData اجرا شده است. FRED و News در تاریخ خنثی فرض شده‌اند؛ ورود روی Close کندل سیگنال انجام شده؛ Spread/Commission/Slippage مدل نشده‌اند؛ MFE/MAE از بعد ورود تا خروج محاسبه شده‌اند. اگر TwelveData کمتر از تعداد درخواستی داده بدهد، barsAnalyzed تعداد واقعی داده دریافتی است.',
+          'بک‌تست روی داده تاریخی واقعی TwelveData اجرا شده است. FRED و News در تاریخ خنثی فرض شده‌اند؛ ورود روی Close کندل سیگنال انجام شده؛ Spread/Commission/Slippage مدل نشده‌اند؛ MFE/MAE از بعد ورود تا خروج محاسبه شده‌اند. تعداد barsAnalyzed تعداد واقعی کندل‌هایی است که برای بخش تست استفاده شده است.',
 
         period,
 
@@ -1790,6 +1869,7 @@ router.get(
           ),
 
         diagnostics: {
+
           baseTradeCount:
             baseTrades.length,
 
@@ -1808,11 +1888,16 @@ router.get(
           requestedHistoricalBars:
             fetchBars,
 
+          testBars:
+            testM15.length,
+
           strategyCount:
             7,
 
           diagnosticEnabled:
-            true
+            true,
+
+          history
         }
       });
 
