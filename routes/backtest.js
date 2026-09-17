@@ -1,536 +1,104 @@
 // Gold Hunter — Historical Backtest
-// XAU/USD 15M
 //
-// Features:
-// - Real historical OHLC from TwelveData
-// - Multi-timeframe analysis
-// - Base Engine vs Quality Engine comparison
-// - Correct hard max-hold handling
-// - Correct MFE / MAE
-// - R-multiple statistics
-// - Direction / session / confidence / quality breakdown
+// Base = موتور اصلی بدون Quality Filter
+// Quality = موتور اصلی + Quality Filter
 //
-// IMPORTANT:
-// Fundamental + News are neutral in historical backtest unless
-// historical provider data is explicitly implemented.
+// محدودیت‌ها:
+// 1) FRED/Finnhub تاریخی لحظه‌ای در دسترس نیستند.
+// 2) ورود روی Close کندل سیگنال شبیه‌سازی می‌شود.
+// 3) Spread / Commission / Slippage مدل نشده‌اند.
+// 4) TwelveData ممکن است عمق تاریخی رایگان را محدود کند.
 
 const express = require('express');
 
 const router = express.Router();
 
-const engine = require('../lib/engine');
+const engine =
+  require('../lib/engine');
 
-
-// ============================================================
-// HELPERS
-// ============================================================
-
-function num(v, fallback) {
-  const x = Number(v);
-  return Number.isFinite(x) ? x : fallback;
+function fmtR(x) {
+  return Number(
+    Number(x).toFixed(3)
+  );
 }
 
-function clamp(v, min, max) {
-  return Math.max(min, Math.min(max, v));
-}
-
-function fmt(v, digits = 3) {
-  return Number(Number(v || 0).toFixed(digits));
-}
-
-function hoursBetween(a, b) {
-  return Math.max(0, (b - a) / 3600000);
-}
-
-function sessionFromTime(time) {
-  if (typeof engine.getSession === 'function') {
-    return engine.getSession(time);
-  }
-
-  const hour = new Date(time).getUTCHours();
-
-  if (hour < 8) return 'ASIA';
-  if (hour < 13) return 'LONDON';
-  if (hour < 17) return 'NEW_YORK';
-
-  return 'NEW_YORK_LATE';
-}
-
-function percentile(values, p) {
-  const x = values
-    .filter(Number.isFinite)
-    .sort((a, b) => a - b);
-
-  if (!x.length) return 0;
-
-  const index = (x.length - 1) * p;
-  const lower = Math.floor(index);
-  const upper = Math.ceil(index);
-
-  if (lower === upper) {
-    return x[lower];
-  }
-
-  return x[lower] + (x[upper] - x[lower]) * (index - lower);
-}
-
-
-// ============================================================
-// BUILD HIGHER-TF WINDOWS
-// ============================================================
-
-function advancePointer(bars, pointer, time) {
-  let p = pointer;
+function advancePointer(
+  bars,
+  ptr,
+  targetTime
+) {
 
   while (
-    p + 1 < bars.length &&
-    bars[p + 1].time <= time
+    ptr + 1 < bars.length &&
+    bars[ptr + 1].time <= targetTime
   ) {
-    p++;
+    ptr++;
   }
 
-  return p;
+  return ptr;
 }
 
-function sliceUntil(bars, pointer, rollingWindow) {
-  const end = pointer + 1;
-
-  const start = Math.max(
-    0,
-    end - rollingWindow
-  );
-
-  return bars.slice(start, end);
-}
-
-
-// ============================================================
-// MFE / MAE
-// ============================================================
-
-function calculateExcursion(position) {
-  const risk = Number(position.riskDistance);
-
-  if (!Number.isFinite(risk) || risk <= 0) {
-    return {
-      mfe: 0,
-      mae: 0
-    };
-  }
-
-  if (position.dir === 'BUY') {
-    const mfe =
-      (position.maxHigh - position.entry) / risk;
-
-    const mae =
-      (position.minLow - position.entry) / risk;
-
-    return {
-      mfe,
-      mae
-    };
-  }
-
-  const mfe =
-    (position.entry - position.minLow) / risk;
-
-  const mae =
-    (position.entry - position.maxHigh) / risk;
-
-  return {
-    mfe,
-    mae
-  };
-}
-
-
-// ============================================================
-// CLOSE POSITION
-// ============================================================
-
-function closePosition(
-  position,
-  bar,
-  exitReason,
-  exitIndex
+function getBaseActive(
+  signal
 ) {
-  const exit = Number(bar.close);
-
-  let r = 0;
-
-  if (position.dir === 'BUY') {
-    r =
-      (exit - position.entry) /
-      position.riskDistance;
-  } else {
-    r =
-      (position.entry - exit) /
-      position.riskDistance;
-  }
-
-  const excursion =
-    calculateExcursion(position);
-
-  return {
-    id: position.id,
-
-    dir: position.dir,
-
-    entry: fmt(position.entry, 5),
-
-    sl: fmt(position.sl, 5),
-
-    tp1: fmt(position.tp1, 5),
-
-    exit: fmt(exit, 5),
-
-    result:
-      r > 0
-        ? 'WIN'
-        : r < 0
-          ? 'LOSS'
-          : 'BREAKEVEN',
-
-    r: fmt(r, 4),
-
-    openTime:
-      new Date(
-        position.openTime
-      ).toISOString(),
-
-    exitTime:
-      new Date(
-        bar.time
-      ).toISOString(),
-
-    durationHours:
-      fmt(
-        hoursBetween(
-          position.openTime,
-          bar.time
-        ),
-        2
-      ),
-
-    exitReason,
-
-    confidence:
-      fmt(
-        position.confidence,
-        2
-      ),
-
-    consensus:
-      position.consensus,
-
-    qualityScore:
-      fmt(
-        position.qualityScore,
-        0
-      ),
-
-    qualityGrade:
-      position.qualityGrade,
-
-    session:
-      position.session,
-
-    rr:
-      fmt(
-        position.rr,
-        3
-      ),
-
-    mfe:
-      fmt(
-        excursion.mfe,
-        3
-      ),
-
-    mae:
-      fmt(
-        excursion.mae,
-        3
-      ),
-
-    openIndex:
-      position.openIndex,
-
-    exitIndex
-  };
-}
-
-
-// ============================================================
-// POSITION UPDATE
-// ============================================================
-
-function updateExcursion(position, bar) {
-  position.maxHigh =
-    Math.max(
-      position.maxHigh,
-      Number(bar.high)
-    );
-
-  position.minLow =
-    Math.min(
-      position.minLow,
-      Number(bar.low)
-    );
-}
-
-
-// ============================================================
-// TRY CLOSE
-// ============================================================
-
-function tryClosePosition(
-  position,
-  bar,
-  index,
-  maxHoldBars
-) {
-  updateExcursion(
-    position,
-    bar
-  );
-
-  const age =
-    index -
-    position.openIndex;
-
-  const reachedMaxHold =
-    age >= maxHoldBars;
-
-  const hitSL =
-    position.dir === 'BUY'
-      ? Number(bar.low) <= position.sl
-      : Number(bar.high) >= position.sl;
-
-  const hitTP =
-    position.dir === 'BUY'
-      ? Number(bar.high) >= position.tp1
-      : Number(bar.low) <= position.tp1;
-
-  // Conservative rule:
-  // If both SL and TP hit in the same candle,
-  // assume SL was hit first.
-
-  if (hitSL) {
-    return closePosition(
-      position,
-      {
-        ...bar,
-        close: position.sl
-      },
-      'SL',
-      index
-    );
-  }
-
-  if (hitTP) {
-    return closePosition(
-      position,
-      {
-        ...bar,
-        close: position.tp1
-      },
-      'TP1',
-      index
-    );
-  }
-
-  // Hard timeout
-
-  if (reachedMaxHold) {
-    return closePosition(
-      position,
-      bar,
-      'TIMEOUT',
-      index
-    );
-  }
-
-  return null;
-}
-
-
-// ============================================================
-// OPEN POSITION
-// ============================================================
-
-function openPosition(
-  decision,
-  bar,
-  index,
-  id
-) {
-  const dir =
-    decision.direction;
 
   if (
-    dir !== 'BUY' &&
-    dir !== 'SELL'
+    !signal ||
+    !signal.direction ||
+    signal.direction === 'WAIT'
   ) {
-    return null;
+    return false;
   }
-
-  const trade =
-    decision.trade;
-
-  if (!trade) {
-    return null;
-  }
-
-  const entry =
-    Number(bar.close);
-
-  const sl =
-    Number(trade.stopLoss);
-
-  const tp1 =
-    Number(
-      trade.targets?.[0]
-    );
 
   if (
-    !Number.isFinite(entry) ||
-    !Number.isFinite(sl) ||
-    !Number.isFinite(tp1)
+    Number(signal.confidence || 0) <
+    Number(engine.MIN_CONFIDENCE)
   ) {
-    return null;
+    return false;
   }
-
-  const riskDistance =
-    Math.abs(
-      entry - sl
-    );
 
   if (
-    !Number.isFinite(
-      riskDistance
-    ) ||
-    riskDistance <= 0
-  ) {
-    return null;
-  }
-
-  return {
-    id,
-
-    dir,
-
-    entry,
-
-    sl,
-
-    tp1,
-
-    riskDistance,
-
-    openIndex:
-      index,
-
-    openTime:
-      bar.time,
-
-    maxHigh:
-      entry,
-
-    minLow:
-      entry,
-
-    confidence:
-      Number(
-        decision.confidence || 0
-      ),
-
-    consensus:
-      `${decision.consensus?.agreeCount || 0}/${decision.consensus?.totalCount || 0}`,
-
-    qualityScore:
-      Number(
-        decision.quality?.score || 0
-      ),
-
-    qualityGrade:
-      decision.quality?.grade ||
-      'UNKNOWN',
-
-    session:
-      decision.quality?.session ||
-      sessionFromTime(
-        bar.time
-      ),
-
-    rr:
-      Number(
-        trade.rr || 0
-      )
-  };
-}
-
-
-// ============================================================
-// BASE DECISION EXTRACTION
-// ============================================================
-
-function getBaseActive(decision) {
-  const qualityBlockers =
-    new Set(
-      decision.quality?.blockers || []
-    );
-
-  const baseBlockers =
-    (
-      decision.blockers || []
-    ).filter(
-      x => !qualityBlockers.has(x)
-    );
-
-  const direction =
-    decision.direction;
-
-  const confidence =
-    Number(
-      decision.confidence || 0
-    );
-
-  const total =
-    Number(
-      decision.consensus?.totalCount || 0
-    );
-
-  const agree =
-    Number(
-      decision.consensus?.agreeCount || 0
-    );
-
-  const sufficientConsensus =
-    agree >=
+    Number(signal.consensus?.agreeCount || 0) <
     Math.ceil(
-      total / 2
-    );
+      Number(signal.consensus?.totalCount || 7) / 2
+    )
+  ) {
+    return false;
+  }
 
-  return {
-    active:
-      direction !== 'WAIT' &&
-      confidence >= engine.MIN_CONFIDENCE &&
-      sufficientConsensus &&
-      baseBlockers.length === 0,
+  /*
+   * فقط blockerهای اصلی.
+   * Quality blocker در Base نادیده گرفته می‌شود.
+   */
+  if (
+    Array.isArray(signal.blockers) &&
+    signal.blockers.length > 0
+  ) {
+    return false;
+  }
 
-    baseBlockers,
-
-    direction
-  };
+  return (
+    signal.decision ===
+      'BUY' ||
+    signal.decision ===
+      'SELL'
+  );
 }
 
+function getQualityActive(
+  signal
+) {
 
-// ============================================================
-// SIMULATION
-// ============================================================
+  return (
+    signal &&
+    (
+      signal.decision === 'BUY' ||
+      signal.decision === 'SELL'
+    )
+  );
+}
 
-async function simulate(
+function simulate(
   m15,
   h1,
   h4,
@@ -539,367 +107,662 @@ async function simulate(
   maxHoldBars,
   mode
 ) {
-  let p1 = 0;
-  let p4 = 0;
-  let pd = 0;
 
-  let position = null;
-
-  let tradeId = 0;
+  let h1Ptr = 0;
+  let h4Ptr = 0;
+  let dPtr = 0;
 
   const trades = [];
 
+  let position = null;
+
+  const startIdx =
+    Math.max(
+      rollingWindow,
+      100
+    );
+
   for (
-    let i = rollingWindow;
+    let i = startIdx;
     i < m15.length;
     i++
   ) {
+
     const bar =
       m15[i];
 
-    // --------------------------------------------------------
-    // UPDATE HIGHER TIMEFRAME POINTERS
-    // --------------------------------------------------------
-
-    p1 =
+    h1Ptr =
       advancePointer(
         h1,
-        p1,
+        h1Ptr,
         bar.time
       );
 
-    p4 =
+    h4Ptr =
       advancePointer(
         h4,
-        p4,
+        h4Ptr,
         bar.time
       );
 
-    pd =
+    dPtr =
       advancePointer(
         daily,
-        pd,
+        dPtr,
         bar.time
       );
 
     if (
-      p1 < 0 ||
-      p4 < 0 ||
-      pd < 0
+      h1Ptr <
+      rollingWindow - 30
     ) {
       continue;
     }
 
-    // --------------------------------------------------------
-    // MANAGE EXISTING POSITION
-    // --------------------------------------------------------
-
-    if (position) {
-      const closed =
-        tryClosePosition(
-          position,
-          bar,
-          i,
-          maxHoldBars
-        );
-
-      if (closed) {
-        trades.push(
-          closed
-        );
-
-        position = null;
-      }
-
-      if (position) {
-        continue;
-      }
+    if (h4Ptr < 30) {
+      continue;
     }
 
-    // --------------------------------------------------------
-    // BUILD WINDOWS
-    // --------------------------------------------------------
+    if (dPtr < 20) {
+      continue;
+    }
 
+    /*
+     * اگر معامله باز است،
+     * ابتدا خروج را بررسی می‌کنیم.
+     */
+    if (position) {
+
+      const age =
+        i - position.openIndex;
+
+      const hitSL =
+        position.dir === 'BUY'
+          ? bar.low <= position.sl
+          : bar.high >= position.sl;
+
+      const hitTP =
+        position.dir === 'BUY'
+          ? bar.high >= position.tp1
+          : bar.low <= position.tp1;
+
+      /*
+       * SL اولویت دارد اگر
+       * SL و TP در یک کندل هر دو لمس شوند.
+       */
+      if (hitSL) {
+
+        const exit =
+          position.sl;
+
+        const r = -1;
+
+        updateMFE(
+          position,
+          bar
+        );
+
+        trades.push({
+          ...position,
+
+          exit,
+
+          exitTime:
+            bar.time,
+
+          result:
+            'LOSS',
+
+          r
+        });
+
+        position = null;
+
+        continue;
+      }
+
+      if (hitTP) {
+
+        const exit =
+          position.tp1;
+
+        const riskDist =
+          Math.abs(
+            position.entry -
+            position.sl
+          );
+
+        const rewardDist =
+          Math.abs(
+            position.tp1 -
+            position.entry
+          );
+
+        const r =
+          rewardDist /
+          riskDist;
+
+        updateMFE(
+          position,
+          bar
+        );
+
+        trades.push({
+          ...position,
+
+          exit,
+
+          exitTime:
+            bar.time,
+
+          result:
+            'WIN',
+
+          r:
+            fmtR(r)
+        });
+
+        position = null;
+
+        continue;
+      }
+
+      /*
+       * حداکثر زمان نگهداری
+       *
+       * دقیقاً روی آخرین کندل مجاز
+       * معامله را می‌بندیم.
+       */
+      if (
+        age >= maxHoldBars
+      ) {
+
+        updateMFE(
+          position,
+          bar
+        );
+
+        const pl =
+          position.dir === 'BUY'
+            ? bar.close -
+              position.entry
+            : position.entry -
+              bar.close;
+
+        const riskDist =
+          Math.abs(
+            position.entry -
+            position.sl
+          );
+
+        const r =
+          riskDist > 0
+            ? pl / riskDist
+            : 0;
+
+        trades.push({
+          ...position,
+
+          exit:
+            bar.close,
+
+          exitTime:
+            bar.time,
+
+          result:
+            r >= 0
+              ? 'TIMEOUT_WIN'
+              : 'TIMEOUT_LOSS',
+
+          r:
+            fmtR(r)
+        });
+
+        position = null;
+
+        continue;
+      }
+
+      /*
+       * تا وقتی معامله باز است،
+       * سیگنال جدید نمی‌گیریم.
+       */
+      updateMFE(
+        position,
+        bar
+      );
+
+      continue;
+    }
+
+    /*
+     * ساخت پنجره تاریخی
+     */
     const m15Window =
       m15.slice(
         Math.max(
           0,
-          i - rollingWindow + 1
+          i -
+            rollingWindow +
+            1
         ),
         i + 1
       );
 
     const h1Window =
-      sliceUntil(
-        h1,
-        p1,
-        rollingWindow
+      h1.slice(
+        Math.max(
+          0,
+          h1Ptr -
+            rollingWindow +
+            1
+        ),
+        h1Ptr + 1
       );
 
     const h4Window =
-      sliceUntil(
-        h4,
-        p4,
-        rollingWindow
+      h4.slice(
+        Math.max(
+          0,
+          h4Ptr -
+            rollingWindow +
+            1
+        ),
+        h4Ptr + 1
       );
 
-    const dailyWindow =
-      sliceUntil(
-        daily,
-        pd,
-        rollingWindow
+    const dWindow =
+      daily.slice(
+        Math.max(
+          0,
+          dPtr -
+            rollingWindow +
+            1
+        ),
+        dPtr + 1
       );
 
     if (
-      m15Window.length < 100 ||
-      h1Window.length < 60 ||
-      h4Window.length < 60 ||
-      dailyWindow.length < 60
+      h1Window.length < 30 ||
+      h4Window.length < 30 ||
+      dWindow.length < 20
     ) {
       continue;
     }
 
-    // --------------------------------------------------------
-    // ANALYZE
-    // --------------------------------------------------------
-
-    const d = {
-      m15:
-        engine.analyze(
-          m15Window
-        ),
-
-      h1:
-        engine.analyze(
-          h1Window
-        ),
-
-      h4:
-        engine.analyze(
-          h4Window
-        ),
-
-      daily:
-        engine.analyze(
-          dailyWindow
-        )
-    };
-
-    const fund =
-      engine.neutralFundamental();
-
-    const news =
-      engine.neutralNewsRisk();
-
-    let decision;
+    let data;
 
     try {
-      decision =
-        engine.decide(
-          d,
-          fund,
-          news
-        );
+
+      data = {
+
+        m15:
+          engine.analyze(
+            m15Window
+          ),
+
+        h1:
+          engine.analyze(
+            h1Window
+          ),
+
+        h4:
+          engine.analyze(
+            h4Window
+          ),
+
+        daily:
+          engine.analyze(
+            dWindow
+          )
+      };
+
     } catch (e) {
       continue;
     }
 
-    // --------------------------------------------------------
-    // DETERMINE MODE
-    // --------------------------------------------------------
-
-    let shouldOpen =
-      false;
-
-    if (
-      mode === 'base'
-    ) {
-      const base =
-        getBaseActive(
-          decision
-        );
-
-      shouldOpen =
-        base.active;
-    } else {
-      // Quality mode
-      shouldOpen =
-        decision.decision ===
-          decision.direction &&
-        decision.direction !==
-          'WAIT';
-    }
-
-    if (!shouldOpen) {
-      continue;
-    }
-
-    // --------------------------------------------------------
-    // OPEN
-    // --------------------------------------------------------
-
-    tradeId++;
-
-    position =
-      openPosition(
-        decision,
-        bar,
-        i,
-        tradeId
+    /*
+     * در بک‌تست:
+     * Fundamental و News خنثی هستند.
+     */
+    const signal =
+      engine.decide(
+        data,
+        engine.neutralFundamental(),
+        engine.neutralNewsRisk()
       );
 
-    if (!position) {
+    const active =
+      mode === 'quality'
+        ? getQualityActive(
+            signal
+          )
+        : getBaseActive(
+            signal
+          );
+
+    if (!active) {
       continue;
     }
+
+    /*
+     * ورود روی Close همان کندلی
+     * که سیگنال صادر شده است.
+     */
+    const dir =
+      signal.decision;
+
+    const entry =
+      bar.close;
+
+    const sl =
+      Number(
+        signal.trade.stopLoss
+      );
+
+    const tp1 =
+      Number(
+        signal.trade.targets[0]
+      );
+
+    const riskDist =
+      Math.abs(
+        entry - sl
+      );
+
+    if (
+      !Number.isFinite(riskDist) ||
+      riskDist <= 0
+    ) {
+      continue;
+    }
+
+    position = {
+
+      dir,
+
+      entry,
+
+      sl,
+
+      tp1,
+
+      openIndex:
+        i,
+
+      openTime:
+        bar.time,
+
+      confidence:
+        signal.confidence,
+
+      agreeCount:
+        signal.consensus.agreeCount,
+
+      totalCount:
+        signal.consensus.totalCount,
+
+      qualityScore:
+        signal.quality?.score ??
+        null,
+
+      qualityGrade:
+        signal.quality?.grade ??
+        null,
+
+      session:
+        signal.quality?.session ??
+        engine.getSession(
+          bar.time
+        ),
+
+      rr:
+        signal.trade.rr,
+
+      mfe:
+        0,
+
+      mae:
+        0,
+
+      riskDist
+    };
+
+    /*
+     * Entry candle عمداً در MFE/MAE
+     * لحاظ نمی‌شود.
+     */
   }
 
-  // ==========================================================
-  // FORCE CLOSE LAST OPEN POSITION
-  // ==========================================================
+  /*
+   * اگر معامله در انتهای دیتاست باز مانده،
+   * با آخرین Close بسته می‌شود.
+   */
+  if (position) {
 
-  if (
-    position &&
-    m15.length
-  ) {
     const lastBar =
       m15[m15.length - 1];
 
-    updateExcursion(
+    updateMFE(
       position,
       lastBar
     );
 
-    trades.push(
-      closePosition(
-        position,
-        lastBar,
-        'END_OF_DATA',
-        m15.length - 1
-      )
-    );
+    const pl =
+      position.dir === 'BUY'
+        ? lastBar.close -
+          position.entry
+        : position.entry -
+          lastBar.close;
+
+    const riskDist =
+      Math.abs(
+        position.entry -
+        position.sl
+      );
+
+    const r =
+      riskDist > 0
+        ? pl / riskDist
+        : 0;
+
+    trades.push({
+
+      ...position,
+
+      exit:
+        lastBar.close,
+
+      exitTime:
+        lastBar.time,
+
+      result:
+        r >= 0
+          ? 'OPEN_WIN'
+          : 'OPEN_LOSS',
+
+      r:
+        fmtR(r)
+    });
   }
 
   return trades;
 }
 
+function updateMFE(
+  position,
+  bar
+) {
 
-// ============================================================
-// STATISTICS
-// ============================================================
+  if (
+    !position ||
+    !bar ||
+    !position.riskDist ||
+    position.riskDist <= 0
+  ) {
+    return;
+  }
 
-function summarize(trades) {
+  if (
+    position.dir === 'BUY'
+  ) {
+
+    const mfe =
+      (bar.high -
+        position.entry) /
+      position.riskDist;
+
+    const mae =
+      (bar.low -
+        position.entry) /
+      position.riskDist;
+
+    position.mfe =
+      Math.max(
+        position.mfe || 0,
+        mfe
+      );
+
+    position.mae =
+      Math.min(
+        position.mae || 0,
+        mae
+      );
+
+  }
+
+  else {
+
+    const mfe =
+      (position.entry -
+        bar.low) /
+      position.riskDist;
+
+    const mae =
+      (position.entry -
+        bar.high) /
+      position.riskDist;
+
+    position.mfe =
+      Math.max(
+        position.mfe || 0,
+        mfe
+      );
+
+    position.mae =
+      Math.min(
+        position.mae || 0,
+        mae
+      );
+  }
+}
+
+function median(values) {
+
+  if (!values.length) {
+    return 0;
+  }
+
+  const x =
+    [...values]
+      .sort(
+        (a, b) => a - b
+      );
+
+  const mid =
+    Math.floor(
+      x.length / 2
+    );
+
+  return x.length % 2
+    ? x[mid]
+    : (x[mid - 1] +
+       x[mid]) / 2;
+}
+
+function summarize(
+  trades
+) {
+
   const total =
     trades.length;
 
   const wins =
     trades.filter(
-      t => Number(t.r) > 0
+      t => t.r > 0
     );
 
   const losses =
     trades.filter(
-      t => Number(t.r) < 0
-    );
-
-  const breakeven =
-    trades.filter(
-      t => Number(t.r) === 0
+      t => t.r <= 0
     );
 
   const netR =
     trades.reduce(
-      (sum, t) =>
-        sum + Number(t.r || 0),
+      (a, t) =>
+        a + Number(t.r || 0),
       0
     );
 
   const grossProfit =
     wins.reduce(
-      (sum, t) =>
-        sum + Number(t.r || 0),
+      (a, t) =>
+        a + Number(t.r || 0),
       0
     );
 
   const grossLoss =
     Math.abs(
       losses.reduce(
-        (sum, t) =>
-          sum + Number(t.r || 0),
+        (a, t) =>
+          a + Number(t.r || 0),
         0
       )
     );
 
-  const pf =
-    grossLoss > 0
-      ? grossProfit / grossLoss
-      : grossProfit > 0
-        ? Infinity
-        : 0;
-
-  const winRate =
-    total > 0
-      ? (wins.length / total) * 100
-      : 0;
-
-  const avgR =
-    total > 0
-      ? netR / total
-      : 0;
-
-  // ----------------------------------------------------------
-  // EQUITY / MAX DRAWDOWN
-  // ----------------------------------------------------------
-
-  let equity = 0;
   let peak = 0;
+  let running = 0;
   let maxDD = 0;
 
-  for (
-    const t of trades
-  ) {
-    equity +=
+  trades.forEach(t => {
+
+    running +=
       Number(t.r || 0);
 
     peak =
       Math.max(
         peak,
-        equity
+        running
       );
 
     maxDD =
       Math.max(
         maxDD,
-        peak - equity
+        peak - running
       );
-  }
+  });
 
   const durations =
-    trades.map(
-      t =>
-        Number(
-          t.durationHours || 0
-        )
+    trades.map(t =>
+      (
+        t.exitTime -
+        t.openTime
+      ) /
+      3600000
     );
 
   const mfes =
     trades.map(
-      t =>
-        Number(t.mfe || 0)
+      t => Number(t.mfe || 0)
     );
 
   const maes =
     trades.map(
-      t =>
-        Number(t.mae || 0)
-    );
-
-  const rrValues =
-    trades.map(
-      t =>
-        Number(t.rr || 0)
+      t => Number(t.mae || 0)
     );
 
   return {
+
     total,
 
     wins:
@@ -909,502 +772,423 @@ function summarize(trades) {
       losses.length,
 
     breakeven:
-      breakeven.length,
+      trades.filter(
+        t => Number(t.r) === 0
+      ).length,
 
     winRate:
-      fmt(
-        winRate,
-        2
-      ),
+      total
+        ? fmtR(
+            wins.length /
+            total *
+            100
+          )
+        : 0,
 
     netR:
-      fmt(
-        netR,
-        4
-      ),
+      fmtR(netR),
 
     grossProfit:
-      fmt(
-        grossProfit,
-        4
-      ),
+      fmtR(grossProfit),
 
     grossLoss:
-      fmt(
-        grossLoss,
-        4
-      ),
+      fmtR(grossLoss),
 
     profitFactor:
-      pf === Infinity
-        ? 'INF'
-        : fmt(
-            pf,
-            3
-          ),
+      grossLoss > 0
+        ? fmtR(
+            grossProfit /
+            grossLoss
+          )
+        : null,
 
     avgR:
-      fmt(
-        avgR,
-        4
-      ),
+      total
+        ? fmtR(
+            netR /
+            total
+          )
+        : 0,
 
     maxDD:
-      fmt(
-        maxDD,
-        4
-      ),
+      fmtR(maxDD),
 
     avgDurationHours:
       durations.length
-        ? fmt(
+        ? fmtR(
             durations.reduce(
-              (a, b) =>
-                a + b,
+              (a, x) => a + x,
               0
             ) /
-            durations.length,
-            2
+            durations.length
           )
         : 0,
 
     medianDurationHours:
       durations.length
-        ? fmt(
-            percentile(
-              durations,
-              0.5
-            ),
-            2
+        ? fmtR(
+            median(durations)
           )
         : 0,
 
     avgMFE:
       mfes.length
-        ? fmt(
+        ? fmtR(
             mfes.reduce(
-              (a, b) =>
-                a + b,
+              (a, x) => a + x,
               0
             ) /
-            mfes.length,
-            3
-          )
-        : 0,
-
-    avgMAE:
-      maes.length
-        ? fmt(
-            maes.reduce(
-              (a, b) =>
-                a + b,
-              0
-            ) /
-            maes.length,
-            3
+            mfes.length
           )
         : 0,
 
     medianMFE:
       mfes.length
-        ? fmt(
-            percentile(
-              mfes,
-              0.5
-            ),
-            3
+        ? fmtR(
+            median(mfes)
+          )
+        : 0,
+
+    avgMAE:
+      maes.length
+        ? fmtR(
+            maes.reduce(
+              (a, x) => a + x,
+              0
+            ) /
+            maes.length
           )
         : 0,
 
     medianMAE:
       maes.length
-        ? fmt(
-            percentile(
-              maes,
-              0.5
-            ),
-            3
+        ? fmtR(
+            median(maes)
           )
         : 0,
 
     avgRR:
-      rrValues.length
-        ? fmt(
-            rrValues.reduce(
-              (a, b) =>
-                a + b,
+      total
+        ? fmtR(
+            trades.reduce(
+              (a, t) =>
+                a +
+                Number(t.rr || 0),
               0
             ) /
-            rrValues.length,
-            3
+            total
           )
         : 0
   };
 }
 
-
-// ============================================================
-// GROUP BY
-// ============================================================
-
-function groupStats(
+function groupBy(
   trades,
-  getter
+  fn
 ) {
-  const groups = {};
-
-  for (
-    const t of trades
-  ) {
-    const key =
-      getter(t);
-
-    if (
-      !groups[key]
-    ) {
-      groups[key] = [];
-    }
-
-    groups[key].push(t);
-  }
 
   const out = {};
 
-  for (
-    const [
-      key,
-      arr
-    ] of Object.entries(
-      groups
-    )
-  ) {
-    out[key] =
-      summarize(arr);
+  for (const t of trades) {
+
+    const key =
+      fn(t);
+
+    if (!out[key]) {
+      out[key] = [];
+    }
+
+    out[key].push(t);
   }
 
-  return out;
+  const result = {};
+
+  for (
+    const [key, items]
+    of Object.entries(out)
+  ) {
+
+    result[key] =
+      summarize(items);
+  }
+
+  return result;
 }
 
-
-// ============================================================
-// COMPARISON
-// ============================================================
-
-function compareStats(
-  base,
-  quality
+function directionStats(
+  trades
 ) {
-  return {
-    tradesDelta:
-      quality.total -
-      base.total,
 
-    winRateDelta:
-      fmt(
-        quality.winRate -
-        base.winRate,
-        2
-      ),
+  return groupBy(
+    trades,
+    t => t.dir
+  );
+}
 
-    netRDelta:
-      fmt(
-        quality.netR -
-        base.netR,
-        4
-      ),
+function sessionStats(
+  trades
+) {
 
-    profitFactorDelta:
-      (
-        quality.profitFactor === 'INF'
-          ? null
-          : base.profitFactor === 'INF'
-            ? null
-            : fmt(
-                Number(
-                  quality.profitFactor
-                ) -
-                Number(
-                  base.profitFactor
-                ),
-                3
-              )
-      ),
-
-    avgRDelta:
-      fmt(
-        quality.avgR -
-        base.avgR,
-        4
-      ),
-
-    maxDDDelta:
-      fmt(
-        quality.maxDD -
-        base.maxDD,
-        4
-      ),
-
-    avgMFEDelta:
-      fmt(
-        quality.avgMFE -
-        base.avgMFE,
-        3
-      ),
-
-    avgMAEDelta:
-      fmt(
-        quality.avgMAE -
-        base.avgMAE,
-        3
+  return groupBy(
+    trades,
+    t =>
+      t.session ||
+      engine.getSession(
+        t.openTime
       )
-  };
-}
-
-
-// ============================================================
-// QUALITY BUCKETS
-// ============================================================
-
-function qualityBuckets(
-  trades
-) {
-  const buckets = {
-    '0-59': [],
-    '60-69': [],
-    '70-74': [],
-    '75-79': [],
-    '80-84': [],
-    '85-89': [],
-    '90-100': []
-  };
-
-  for (
-    const t of trades
-  ) {
-    const q =
-      Number(
-        t.qualityScore || 0
-      );
-
-    if (q < 60)
-      buckets['0-59'].push(t);
-
-    else if (q < 70)
-      buckets['60-69'].push(t);
-
-    else if (q < 75)
-      buckets['70-74'].push(t);
-
-    else if (q < 80)
-      buckets['75-79'].push(t);
-
-    else if (q < 85)
-      buckets['80-84'].push(t);
-
-    else if (q < 90)
-      buckets['85-89'].push(t);
-
-    else
-      buckets['90-100'].push(t);
-  }
-
-  return Object.fromEntries(
-    Object.entries(
-      buckets
-    ).map(
-      ([key, arr]) => [
-        key,
-        summarize(arr)
-      ]
-    )
   );
 }
 
-
-// ============================================================
-// CONFIDENCE BUCKETS
-// ============================================================
-
-function confidenceBuckets(
+function confidenceStats(
   trades
 ) {
-  const buckets = {
-    '70-79': [],
-    '80-89': [],
-    '90-100': []
-  };
 
-  for (
-    const t of trades
-  ) {
-    const c =
-      Number(
-        t.confidence || 0
-      );
+  return groupBy(
+    trades,
+    t => {
 
-    if (c < 80) {
-      buckets['70-79'].push(t);
+      const c =
+        Number(
+          t.confidence || 0
+        );
+
+      if (c < 70) {
+        return '<70';
+      }
+
+      if (c < 80) {
+        return '70-79';
+      }
+
+      if (c < 90) {
+        return '80-89';
+      }
+
+      return '90-100';
     }
-
-    else if (c < 90) {
-      buckets['80-89'].push(t);
-    }
-
-    else {
-      buckets['90-100'].push(t);
-    }
-  }
-
-  return Object.fromEntries(
-    Object.entries(
-      buckets
-    ).map(
-      ([key, arr]) => [
-        key,
-        summarize(arr)
-      ]
-    )
   );
 }
 
-
-// ============================================================
-// RR BUCKETS
-// ============================================================
-
-function rrBuckets(
+function qualityStats(
   trades
 ) {
-  const buckets = {
-    '1.0-1.49': [],
-    '1.5-1.99': [],
-    '2.0-2.49': [],
-    '2.5-2.99': [],
-    '3.0+': []
-  };
 
-  for (
-    const t of trades
-  ) {
-    const rr =
-      Number(
-        t.rr || 0
-      );
+  return groupBy(
+    trades,
+    t => {
 
-    if (rr < 1.5)
-      buckets['1.0-1.49'].push(t);
+      const q =
+        Number(
+          t.qualityScore || 0
+        );
 
-    else if (rr < 2)
-      buckets['1.5-1.99'].push(t);
+      if (q < 65) {
+        return '<65';
+      }
 
-    else if (rr < 2.5)
-      buckets['2.0-2.49'].push(t);
+      if (q < 75) {
+        return '65-74';
+      }
 
-    else if (rr < 3)
-      buckets['2.5-2.99'].push(t);
+      if (q < 85) {
+        return '75-84';
+      }
 
-    else
-      buckets['3.0+'].push(t);
-  }
-
-  return Object.fromEntries(
-    Object.entries(
-      buckets
-    ).map(
-      ([key, arr]) => [
-        key,
-        summarize(arr)
-      ]
-    )
+      return '85-100';
+    }
   );
 }
 
+function rrStats(
+  trades
+) {
 
-// ============================================================
-// ROUTE
-// ============================================================
-//
-// IMPORTANT:
-// server.js mounts this router at:
-//
-//   /api/backtest
-//
-// Therefore the route inside this file MUST be:
-//
-//   /
-//
-// Otherwise Express would require:
-//
-//   /api/backtest/api/backtest
-//
-// ============================================================
+  return groupBy(
+    trades,
+    t => {
+
+      const rr =
+        Number(
+          t.rr || 0
+        );
+
+      if (rr < 1.5) {
+        return '<1.5';
+      }
+
+      if (rr < 2) {
+        return '1.5-1.99';
+      }
+
+      if (rr < 3) {
+        return '2-2.99';
+      }
+
+      return '3+';
+    }
+  );
+}
+
+function cleanTrades(
+  trades
+) {
+
+  return trades
+    .slice(-50)
+    .map(t => ({
+
+      dir:
+        t.dir,
+
+      entry:
+        fmtR(t.entry),
+
+      sl:
+        fmtR(t.sl),
+
+      tp1:
+        fmtR(t.tp1),
+
+      exit:
+        fmtR(t.exit),
+
+      result:
+        t.result,
+
+      r:
+        fmtR(t.r),
+
+      mfe:
+        fmtR(t.mfe),
+
+      mae:
+        fmtR(t.mae),
+
+      confidence:
+        fmtR(t.confidence),
+
+      consensus:
+        `${t.agreeCount}/${t.totalCount}`,
+
+      qualityScore:
+        t.qualityScore != null
+          ? fmtR(t.qualityScore)
+          : null,
+
+      qualityGrade:
+        t.qualityGrade,
+
+      session:
+        t.session,
+
+      rr:
+        fmtR(t.rr),
+
+      openTime:
+        new Date(
+          t.openTime
+        ).toISOString(),
+
+      exitTime:
+        new Date(
+          t.exitTime
+        ).toISOString()
+    }));
+}
 
 router.get(
   '/',
   async (req, res) => {
 
-    const startedAt =
-      Date.now();
+    if (
+      !process.env.TWELVEDATA_API_KEY
+    ) {
+
+      return res.json({
+        status:
+          'UNAVAILABLE',
+
+        error:
+          'no-api-key-configured'
+      });
+    }
+
+    const requestedBars =
+      Math.max(
+        1000,
+        Math.min(
+          Number(
+            req.query.bars
+          ) || 10000,
+          50000
+        )
+      );
+
+    const months =
+      Math.max(
+        1,
+        Math.min(
+          Number(
+            req.query.months
+          ) || 6,
+          24
+        )
+      );
+
+    const rollingWindow =
+      Math.max(
+        100,
+        Math.min(
+          Number(
+            req.query.rollingWindow
+          ) || 220,
+          500
+        )
+      );
+
+    const maxHoldDays =
+      Math.max(
+        1,
+        Math.min(
+          Number(
+            req.query.maxHoldDays
+          ) || 3,
+          10
+        )
+      );
+
+    const maxHoldBars =
+      maxHoldDays *
+      24 *
+      4;
+
+    const mode =
+      ['base', 'quality', 'compare']
+        .includes(
+          String(
+            req.query.mode ||
+            'compare'
+          )
+        )
+        ? String(
+            req.query.mode ||
+            'compare'
+          )
+        : 'compare';
+
+    /*
+     * bars + rollingWindow
+     * برای اینکه ابتدای بک‌تست
+     * هم داده کافی برای اندیکاتورها داشته باشد.
+     */
+    const fetchBars =
+      Math.min(
+        requestedBars +
+          rollingWindow,
+        50000
+      );
 
     try {
-
-      const requestedBars =
-        clamp(
-          num(
-            req.query.bars,
-            10000
-          ),
-          1000,
-          50000
-        );
-
-      const months =
-        clamp(
-          num(
-            req.query.months,
-            12
-          ),
-          1,
-          12
-        );
-
-      const maxHoldDays =
-        clamp(
-          num(
-            req.query.maxHoldDays,
-            3
-          ),
-          1,
-          10
-        );
-
-      const rollingWindow =
-        clamp(
-          num(
-            req.query.rollingWindow,
-            220
-          ),
-          100,
-          500
-        );
-
-      const maxHoldBars =
-        Math.round(
-          maxHoldDays *
-          24 *
-          4
-        );
-
-      const mode =
-        (
-          req.query.mode ||
-          'compare'
-        ).toLowerCase();
-
-
-      // --------------------------------------------------------
-      // FETCH DATA
-      // --------------------------------------------------------
 
       const [
         m15,
@@ -1416,31 +1200,33 @@ router.get(
 
           engine.fetchTFHistory(
             '15M',
-            requestedBars
+            fetchBars
           ),
 
           engine.fetchTFHistory(
             '1H',
             Math.ceil(
-              requestedBars / 4
-            ) + rollingWindow
+              fetchBars / 4
+            ) +
+              rollingWindow
           ),
 
           engine.fetchTFHistory(
             '4H',
             Math.ceil(
-              requestedBars / 16
-            ) + rollingWindow
+              fetchBars / 16
+            ) +
+              rollingWindow
           ),
 
           engine.fetchTFHistory(
             'Daily',
             Math.ceil(
-              requestedBars / 96
-            ) + rollingWindow
+              fetchBars / 96
+            ) +
+              rollingWindow
           )
         ]);
-
 
       if (
         !m15 ||
@@ -1449,55 +1235,60 @@ router.get(
         !daily
       ) {
 
-        return res.status(503).json({
-
-          ok: false,
+        return res.json({
+          status:
+            'UNAVAILABLE',
 
           error:
-            'Historical data unavailable',
-
-          detail:
-            'TwelveData returned incomplete historical data.'
+            'market-data-unavailable'
         });
       }
-
 
       if (
         m15.length <
         rollingWindow + 100
       ) {
 
-        return res.status(400).json({
-
-          ok: false,
+        return res.json({
+          status:
+            'UNAVAILABLE',
 
           error:
-            'Not enough M15 bars',
+            'insufficient-history-for-backtest',
 
-          bars:
-            m15.length,
-
-          required:
-            rollingWindow + 100
+          barsReceived:
+            m15.length
         });
       }
 
+      /*
+       * فقط requestedBars آخر را
+       * برای تحلیل استفاده می‌کنیم.
+       */
+      const startCut =
+        Math.max(
+          0,
+          m15.length -
+            requestedBars
+        );
 
-      // --------------------------------------------------------
-      // RUN SIMULATIONS
-      // --------------------------------------------------------
+      const testM15 =
+        m15.slice(startCut);
 
+      /*
+       * اجرای Base و Quality
+       */
       let baseTrades = [];
       let qualityTrades = [];
 
-
       if (
-        mode === 'base'
+        mode === 'base' ||
+        mode === 'compare'
       ) {
 
         baseTrades =
-          await simulate(
-            m15,
+          simulate(
+            testM15,
             h1,
             h4,
             daily,
@@ -1507,13 +1298,14 @@ router.get(
           );
       }
 
-      else if (
-        mode === 'quality'
+      if (
+        mode === 'quality' ||
+        mode === 'compare'
       ) {
 
         qualityTrades =
-          await simulate(
-            m15,
+          simulate(
+            testM15,
             h1,
             h4,
             daily,
@@ -1522,54 +1314,6 @@ router.get(
             'quality'
           );
       }
-
-      else {
-
-        [
-          baseTrades,
-          qualityTrades
-        ] =
-          await Promise.all([
-
-            simulate(
-              m15,
-              h1,
-              h4,
-              daily,
-              rollingWindow,
-              maxHoldBars,
-              'base'
-            ),
-
-            simulate(
-              m15,
-              h1,
-              h4,
-              daily,
-              rollingWindow,
-              maxHoldBars,
-              'quality'
-            )
-          ]);
-      }
-
-
-      // --------------------------------------------------------
-      // SELECT PRIMARY RESULT
-      // --------------------------------------------------------
-
-      const selectedTrades =
-        mode === 'base'
-          ? baseTrades
-          : mode === 'quality'
-            ? qualityTrades
-            : qualityTrades;
-
-
-      const stats =
-        summarize(
-          selectedTrades
-        );
 
       const baseStats =
         summarize(
@@ -1581,146 +1325,120 @@ router.get(
           qualityTrades
         );
 
+      const comparison = {
 
-      // --------------------------------------------------------
-      // PERIOD
-      // --------------------------------------------------------
+        baseTrades:
+          baseStats.total,
 
-      const firstBar =
-        m15[0];
+        qualityTrades:
+          qualityStats.total,
 
-      const lastBar =
-        m15[m15.length - 1];
+        retention:
+          baseStats.total
+            ? fmtR(
+                qualityStats.total /
+                baseStats.total *
+                100
+              )
+            : 0,
 
+        filtered:
+          Math.max(
+            0,
+            baseStats.total -
+              qualityStats.total
+          ),
 
-      // --------------------------------------------------------
-      // OUTPUT TRADES
-      // --------------------------------------------------------
+        netRDelta:
+          fmtR(
+            qualityStats.netR -
+            baseStats.netR
+          ),
 
-      const recentTrades =
-        selectedTrades
-          .slice(-50)
-          .map(
-            t => ({
+        winRateDelta:
+          fmtR(
+            qualityStats.winRate -
+            baseStats.winRate
+          ),
 
-              dir:
-                t.dir,
+        profitFactorDelta:
+          (
+            qualityStats.profitFactor != null &&
+            baseStats.profitFactor != null
+          )
+            ? fmtR(
+                qualityStats.profitFactor -
+                baseStats.profitFactor
+              )
+            : null,
 
-              entry:
-                t.entry,
+        avgRDelta:
+          fmtR(
+            qualityStats.avgR -
+            baseStats.avgR
+          ),
 
-              sl:
-                t.sl,
+        maxDDDelta:
+          fmtR(
+            qualityStats.maxDD -
+            baseStats.maxDD
+          ),
 
-              tp1:
-                t.tp1,
+        avgMFEDelta:
+          fmtR(
+            qualityStats.avgMFE -
+            baseStats.avgMFE
+          ),
 
-              exit:
-                t.exit,
+        avgMAEDelta:
+          fmtR(
+            qualityStats.avgMAE -
+            baseStats.avgMAE
+          )
+      };
 
-              result:
-                t.result,
+      let selectedTrades =
+        mode === 'base'
+          ? baseTrades
+          : mode === 'quality'
+            ? qualityTrades
+            : qualityTrades;
 
-              r:
-                t.r,
+      const selectedStats =
+        mode === 'base'
+          ? baseStats
+          : mode === 'quality'
+            ? qualityStats
+            : qualityStats;
 
-              openTime:
-                t.openTime,
+      /*
+       * ماه‌ها را فعلاً به‌عنوان
+       * metadata گزارش می‌کنیم.
+       * محدودیت اصلی داده واقعی
+       * تعداد کندل دریافتی است.
+       */
+      const period = {
 
-              exitTime:
-                t.exitTime,
+        from:
+          new Date(
+            testM15[0]?.time || 0
+          ).toISOString(),
 
-              durationHours:
-                t.durationHours,
+        to:
+          new Date(
+            testM15[
+              testM15.length - 1
+            ].time
+          ).toISOString(),
 
-              exitReason:
-                t.exitReason,
+        requestedBars,
 
-              confidence:
-                t.confidence,
+        barsAnalyzed:
+          testM15.length,
 
-              consensus:
-                t.consensus,
-
-              qualityScore:
-                t.qualityScore,
-
-              qualityGrade:
-                t.qualityGrade,
-
-              session:
-                t.session,
-
-              rr:
-                t.rr,
-
-              mfe:
-                t.mfe,
-
-              mae:
-                t.mae
-            })
-          );
-
-
-      // --------------------------------------------------------
-      // BREAKDOWNS
-      // --------------------------------------------------------
-
-      const direction =
-        groupStats(
-          selectedTrades,
-          t => t.dir
-        );
-
-      const sessions =
-        groupStats(
-          selectedTrades,
-          t => t.session
-        );
-
-      const confidence =
-        confidenceBuckets(
-          selectedTrades
-        );
-
-      const quality =
-        qualityBuckets(
-          selectedTrades
-        );
-
-      const rr =
-        rrBuckets(
-          selectedTrades
-        );
-
-
-      // --------------------------------------------------------
-      // COMPARISON
-      // --------------------------------------------------------
-
-      const comparison =
-        compareStats(
-          baseStats,
-          qualityStats
-        );
-
-
-      // --------------------------------------------------------
-      // QUALITY FILTER INFO
-      // --------------------------------------------------------
-
-      const qualityThreshold =
-        Number(
-          engine.MIN_QUALITY_SCORE ||
-          process.env.MIN_QUALITY_SCORE ||
-          70
-        );
-
-
-      // --------------------------------------------------------
-      // RESPONSE
-      // --------------------------------------------------------
+        monthsRequested:
+          months
+      };
 
       return res.json({
 
@@ -1731,50 +1449,31 @@ router.get(
 
         mode,
 
-        symbol:
-          engine.SYMBOL,
+        disclaimer:
+          'بک‌تست روی داده تاریخی واقعی TwelveData اجرا شده است. FRED و News در تاریخ خنثی فرض شده‌اند؛ ورود روی Close کندل سیگنال انجام شده؛ Spread/Commission/Slippage مدل نشده‌اند. MFE/MAE از بعد از ورود تا خروج محاسبه شده‌اند. اگر TwelveData کمتر از تعداد درخواستی داده تاریخی بدهد، barsAnalyzed تعداد واقعی داده دریافتی را نشان می‌دهد.',
 
-        timeframe:
-          '15M',
+        period,
 
-        requestedBars,
+        parameters: {
 
-        barsAnalyzed:
-          m15.length,
+          rollingWindow,
 
-        rollingWindow,
+          maxHoldDays,
 
-        maxHoldDays,
+          maxHoldBars,
 
-        maxHoldBars,
+          minConfidence:
+            engine.MIN_CONFIDENCE,
 
-        minConfidence:
-          engine.MIN_CONFIDENCE,
+          minRR:
+            engine.MIN_RR,
 
-        minRR:
-          engine.MIN_RR,
-
-        minQualityScore:
-          qualityThreshold,
-
-        period: {
-
-          from:
-            new Date(
-              firstBar.time
-            ).toISOString(),
-
-          to:
-            new Date(
-              lastBar.time
-            ).toISOString()
+          minQualityScore:
+            engine.MIN_QUALITY_SCORE
         },
 
-
-        stats,
-
-        trades:
-          recentTrades,
+        stats:
+          selectedStats,
 
         baseStats,
 
@@ -1782,16 +1481,35 @@ router.get(
 
         comparison,
 
-        direction,
+        direction:
+          directionStats(
+            selectedTrades
+          ),
 
-        sessions,
+        sessions:
+          sessionStats(
+            selectedTrades
+          ),
 
-        confidence,
+        confidence:
+          confidenceStats(
+            selectedTrades
+          ),
 
-        quality,
+        quality:
+          qualityStats(
+            selectedTrades
+          ),
 
-        rr,
+        rr:
+          rrStats(
+            selectedTrades
+          ),
 
+        trades:
+          cleanTrades(
+            selectedTrades
+          ),
 
         diagnostics: {
 
@@ -1801,81 +1519,38 @@ router.get(
           qualityTradeCount:
             qualityTrades.length,
 
-          tradesFilteredByQuality:
-            Math.max(
-              0,
-              baseTrades.length -
-              qualityTrades.length
-            ),
+          qualityRetention:
+            comparison.retention,
 
-          qualityRetentionRate:
-            baseTrades.length > 0
-              ? fmt(
-                  (
-                    qualityTrades.length /
-                    baseTrades.length
-                  ) * 100,
-                  2
-                )
-              : 0,
+          qualityFiltered:
+            comparison.filtered,
 
-          qualityThreshold,
+          historicalBarsReturned:
+            m15.length,
 
-          maxHoldHours:
-            maxHoldDays * 24,
-
-          executionModel:
-            'Entry at signal candle CLOSE',
-
-          sameCandleRule:
-            'SL/TP are not checked on entry candle',
-
-          sameCandleSlTpRule:
-            'If SL and TP both touch the same candle, SL is assumed first',
-
-          timeoutRule:
-            `Hard timeout at ${maxHoldBars} bars (${maxHoldDays} days)`,
-
-          excursionRule:
-            'MFE/MAE calculated from entry through exit candle',
-
-          costs:
-            'Spread, commission and slippage are not included'
-        },
-
-
-        disclaimer:
-          'بک‌تست روی داده تاریخی واقعی اجرا شده است. فاندامنتال و ریسک خبری در این تست خنثی فرض شده‌اند. ورود دقیقاً روی قیمت بسته‌شدن کندل سیگنال شبیه‌سازی شده است و اسپرد، کمیسیون و اسلیپیج لحاظ نشده‌اند.',
-
-        executionMs:
-          Date.now() -
-          startedAt
+          requestedHistoricalBars:
+            fetchBars
+        }
       });
 
     } catch (e) {
 
       console.error(
-        'BACKTEST ERROR:',
+        '[backtest]',
         e
       );
 
-      return res.status(500).json({
+      return res.json({
 
-        ok: false,
+        status:
+          'UNAVAILABLE',
 
         error:
-          e.message ||
-          'Backtest failed',
-
-        stack:
-          process.env.NODE_ENV ===
-          'development'
-            ? e.stack
-            : undefined
+          'backtest-exception: ' +
+          e.message
       });
     }
   }
 );
-
 
 module.exports = router;
