@@ -27,45 +27,27 @@ const engine = require('../lib/engine');
 
 function num(v, fallback) {
   const x = Number(v);
-  return Number.isFinite(x)
-    ? x
-    : fallback;
+  return Number.isFinite(x) ? x : fallback;
 }
-
 
 function clamp(v, min, max) {
-  return Math.max(
-    min,
-    Math.min(max, v)
-  );
+  return Math.max(min, Math.min(max, v));
 }
-
 
 function fmt(v, digits = 3) {
-  return Number(
-    Number(v || 0).toFixed(digits)
-  );
+  return Number(Number(v || 0).toFixed(digits));
 }
-
 
 function hoursBetween(a, b) {
-  return Math.max(
-    0,
-    (b - a) / 3600000
-  );
+  return Math.max(0, (b - a) / 3600000);
 }
 
-
 function sessionFromTime(time) {
-  if (
-    typeof engine.getSession ===
-    'function'
-  ) {
+  if (typeof engine.getSession === 'function') {
     return engine.getSession(time);
   }
 
-  const hour =
-    new Date(time).getUTCHours();
+  const hour = new Date(time).getUTCHours();
 
   if (hour < 8) return 'ASIA';
   if (hour < 13) return 'LONDON';
@@ -74,34 +56,22 @@ function sessionFromTime(time) {
   return 'NEW_YORK_LATE';
 }
 
-
 function percentile(values, p) {
-
-  const x =
-    values
-      .filter(Number.isFinite)
-      .sort((a, b) => a - b);
+  const x = values
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
 
   if (!x.length) return 0;
 
-  const index =
-    (x.length - 1) * p;
-
-  const lower =
-    Math.floor(index);
-
-  const upper =
-    Math.ceil(index);
+  const index = (x.length - 1) * p;
+  const lower = Math.floor(index);
+  const upper = Math.ceil(index);
 
   if (lower === upper) {
     return x[lower];
   }
 
-  return (
-    x[lower] +
-    (x[upper] - x[lower]) *
-      (index - lower)
-  );
+  return x[lower] + (x[upper] - x[lower]) * (index - lower);
 }
 
 
@@ -109,12 +79,7 @@ function percentile(values, p) {
 // BUILD HIGHER-TF WINDOWS
 // ============================================================
 
-function advancePointer(
-  bars,
-  pointer,
-  time
-) {
-
+function advancePointer(bars, pointer, time) {
   let p = pointer;
 
   while (
@@ -127,26 +92,15 @@ function advancePointer(
   return p;
 }
 
+function sliceUntil(bars, pointer, rollingWindow) {
+  const end = pointer + 1;
 
-function sliceUntil(
-  bars,
-  pointer,
-  rollingWindow
-) {
-
-  const end =
-    pointer + 1;
-
-  const start =
-    Math.max(
-      0,
-      end - rollingWindow
-    );
-
-  return bars.slice(
-    start,
-    end
+  const start = Math.max(
+    0,
+    end - rollingWindow
   );
+
+  return bars.slice(start, end);
 }
 
 
@@ -154,42 +108,22 @@ function sliceUntil(
 // MFE / MAE
 // ============================================================
 
-function calculateExcursion(
-  position
-) {
+function calculateExcursion(position) {
+  const risk = Number(position.riskDistance);
 
-  const risk =
-    Number(
-      position.riskDistance
-    );
-
-  if (
-    !Number.isFinite(risk) ||
-    risk <= 0
-  ) {
-
+  if (!Number.isFinite(risk) || risk <= 0) {
     return {
       mfe: 0,
       mae: 0
     };
   }
 
-
-  if (
-    position.dir === 'BUY'
-  ) {
-
+  if (position.dir === 'BUY') {
     const mfe =
-      (
-        position.maxHigh -
-        position.entry
-      ) / risk;
+      (position.maxHigh - position.entry) / risk;
 
     const mae =
-      (
-        position.minLow -
-        position.entry
-      ) / risk;
+      (position.minLow - position.entry) / risk;
 
     return {
       mfe,
@@ -197,18 +131,11 @@ function calculateExcursion(
     };
   }
 
-
   const mfe =
-    (
-      position.entry -
-      position.minLow
-    ) / risk;
+    (position.entry - position.minLow) / risk;
 
   const mae =
-    (
-      position.entry -
-      position.maxHigh
-    ) / risk;
+    (position.entry - position.maxHigh) / risk;
 
   return {
     mfe,
@@ -227,59 +154,35 @@ function closePosition(
   exitReason,
   exitIndex
 ) {
-
-  const exit =
-    Number(bar.close);
+  const exit = Number(bar.close);
 
   let r = 0;
 
-  if (
-    position.dir === 'BUY'
-  ) {
-
+  if (position.dir === 'BUY') {
     r =
-      (
-        exit -
-        position.entry
-      ) /
+      (exit - position.entry) /
       position.riskDistance;
-
   } else {
-
     r =
-      (
-        position.entry -
-        exit
-      ) /
+      (position.entry - exit) /
       position.riskDistance;
   }
 
-
   const excursion =
-    calculateExcursion(
-      position
-    );
-
+    calculateExcursion(position);
 
   return {
+    id: position.id,
 
-    id:
-      position.id,
+    dir: position.dir,
 
-    dir:
-      position.dir,
+    entry: fmt(position.entry, 5),
 
-    entry:
-      fmt(position.entry, 5),
+    sl: fmt(position.sl, 5),
 
-    sl:
-      fmt(position.sl, 5),
+    tp1: fmt(position.tp1, 5),
 
-    tp1:
-      fmt(position.tp1, 5),
-
-    exit:
-      fmt(exit, 5),
+    exit: fmt(exit, 5),
 
     result:
       r > 0
@@ -288,8 +191,7 @@ function closePosition(
           ? 'LOSS'
           : 'BREAKEVEN',
 
-    r:
-      fmt(r, 4),
+    r: fmt(r, 4),
 
     openTime:
       new Date(
@@ -363,11 +265,7 @@ function closePosition(
 // POSITION UPDATE
 // ============================================================
 
-function updateExcursion(
-  position,
-  bar
-) {
-
+function updateExcursion(position, bar) {
   position.maxHigh =
     Math.max(
       position.maxHigh,
@@ -385,20 +283,6 @@ function updateExcursion(
 // ============================================================
 // TRY CLOSE
 // ============================================================
-//
-// Returns:
-//   null       => position remains open
-//   trade      => position closed
-//
-// IMPORTANT:
-// The entry occurs at the CLOSE of the signal candle.
-// Therefore the signal candle itself is NOT used to trigger
-// SL/TP after entry.
-//
-// maxHoldBars is a hard time limit.
-// Once age reaches maxHoldBars, only that bar is allowed
-// to hit SL/TP. If neither is hit, position closes at close.
-//
 
 function tryClosePosition(
   position,
@@ -406,84 +290,59 @@ function tryClosePosition(
   index,
   maxHoldBars
 ) {
-
   updateExcursion(
     position,
     bar
   );
 
-
   const age =
     index -
     position.openIndex;
 
-
   const reachedMaxHold =
     age >= maxHoldBars;
 
-
   const hitSL =
     position.dir === 'BUY'
-
-      ? Number(bar.low) <=
-        position.sl
-
-      : Number(bar.high) >=
-        position.sl;
-
+      ? Number(bar.low) <= position.sl
+      : Number(bar.high) >= position.sl;
 
   const hitTP =
     position.dir === 'BUY'
+      ? Number(bar.high) >= position.tp1
+      : Number(bar.low) <= position.tp1;
 
-      ? Number(bar.high) >=
-        position.tp1
-
-      : Number(bar.low) <=
-        position.tp1;
-
-
-  // ----------------------------------------------------------
-  // SL/TP have priority on the final allowed bar.
-  // Conservative rule: if both hit in the same candle,
+  // Conservative rule:
+  // If both SL and TP hit in the same candle,
   // assume SL was hit first.
-  // ----------------------------------------------------------
 
   if (hitSL) {
-
     return closePosition(
       position,
       {
         ...bar,
-        close:
-          position.sl
+        close: position.sl
       },
       'SL',
       index
     );
   }
 
-
   if (hitTP) {
-
     return closePosition(
       position,
       {
         ...bar,
-        close:
-          position.tp1
+        close: position.tp1
       },
       'TP1',
       index
     );
   }
 
-
-  // ----------------------------------------------------------
-  // HARD TIMEOUT
-  // ----------------------------------------------------------
+  // Hard timeout
 
   if (reachedMaxHold) {
-
     return closePosition(
       position,
       bar,
@@ -491,7 +350,6 @@ function tryClosePosition(
       index
     );
   }
-
 
   return null;
 }
@@ -507,7 +365,6 @@ function openPosition(
   index,
   id
 ) {
-
   const dir =
     decision.direction;
 
@@ -518,7 +375,6 @@ function openPosition(
     return null;
   }
 
-
   const trade =
     decision.trade;
 
@@ -526,20 +382,16 @@ function openPosition(
     return null;
   }
 
-
   const entry =
     Number(bar.close);
 
-
   const sl =
     Number(trade.stopLoss);
-
 
   const tp1 =
     Number(
       trade.targets?.[0]
     );
-
 
   if (
     !Number.isFinite(entry) ||
@@ -549,12 +401,10 @@ function openPosition(
     return null;
   }
 
-
   const riskDistance =
     Math.abs(
       entry - sl
     );
-
 
   if (
     !Number.isFinite(
@@ -565,9 +415,7 @@ function openPosition(
     return null;
   }
 
-
   return {
-
     id,
 
     dir,
@@ -626,60 +474,37 @@ function openPosition(
 // ============================================================
 // BASE DECISION EXTRACTION
 // ============================================================
-//
-// engine.decide() now returns combined blockers:
-//
-//   original blockers
-//   +
-//   quality blockers
-//
-// To compare the old/base engine against Quality Engine,
-// remove only blockers that came from quality.blockers.
-//
 
-function getBaseActive(
-  decision
-) {
-
+function getBaseActive(decision) {
   const qualityBlockers =
     new Set(
-      decision.quality?.blockers ||
-      []
+      decision.quality?.blockers || []
     );
-
 
   const baseBlockers =
     (
-      decision.blockers ||
-      []
+      decision.blockers || []
     ).filter(
       x => !qualityBlockers.has(x)
     );
 
-
   const direction =
     decision.direction;
-
 
   const confidence =
     Number(
       decision.confidence || 0
     );
 
-
   const total =
     Number(
-      decision.consensus?.totalCount ||
-      0
+      decision.consensus?.totalCount || 0
     );
-
 
   const agree =
     Number(
-      decision.consensus?.agreeCount ||
-      0
+      decision.consensus?.agreeCount || 0
     );
-
 
   const sufficientConsensus =
     agree >=
@@ -687,17 +512,11 @@ function getBaseActive(
       total / 2
     );
 
-
   return {
-
     active:
       direction !== 'WAIT' &&
-
-      confidence >=
-        engine.MIN_CONFIDENCE &&
-
+      confidence >= engine.MIN_CONFIDENCE &&
       sufficientConsensus &&
-
       baseBlockers.length === 0,
 
     baseBlockers,
@@ -720,11 +539,9 @@ async function simulate(
   maxHoldBars,
   mode
 ) {
-
   let p1 = 0;
   let p4 = 0;
   let pd = 0;
-
 
   let position = null;
 
@@ -732,16 +549,13 @@ async function simulate(
 
   const trades = [];
 
-
   for (
     let i = rollingWindow;
     i < m15.length;
     i++
   ) {
-
     const bar =
       m15[i];
-
 
     // --------------------------------------------------------
     // UPDATE HIGHER TIMEFRAME POINTERS
@@ -768,7 +582,6 @@ async function simulate(
         bar.time
       );
 
-
     if (
       p1 < 0 ||
       p4 < 0 ||
@@ -777,13 +590,11 @@ async function simulate(
       continue;
     }
 
-
     // --------------------------------------------------------
     // MANAGE EXISTING POSITION
     // --------------------------------------------------------
 
     if (position) {
-
       const closed =
         tryClosePosition(
           position,
@@ -792,9 +603,7 @@ async function simulate(
           maxHoldBars
         );
 
-
       if (closed) {
-
         trades.push(
           closed
         );
@@ -802,17 +611,10 @@ async function simulate(
         position = null;
       }
 
-
-      // ------------------------------------------------------
-      // If position was open, do not open another one
-      // on the same candle.
-      // ------------------------------------------------------
-
       if (position) {
         continue;
       }
     }
-
 
     // --------------------------------------------------------
     // BUILD WINDOWS
@@ -827,14 +629,12 @@ async function simulate(
         i + 1
       );
 
-
     const h1Window =
       sliceUntil(
         h1,
         p1,
         rollingWindow
       );
-
 
     const h4Window =
       sliceUntil(
@@ -843,14 +643,12 @@ async function simulate(
         rollingWindow
       );
 
-
     const dailyWindow =
       sliceUntil(
         daily,
         pd,
         rollingWindow
       );
-
 
     if (
       m15Window.length < 100 ||
@@ -861,13 +659,11 @@ async function simulate(
       continue;
     }
 
-
     // --------------------------------------------------------
     // ANALYZE
     // --------------------------------------------------------
 
     const d = {
-
       m15:
         engine.analyze(
           m15Window
@@ -889,31 +685,24 @@ async function simulate(
         )
     };
 
-
     const fund =
       engine.neutralFundamental();
-
 
     const news =
       engine.neutralNewsRisk();
 
-
     let decision;
 
     try {
-
       decision =
         engine.decide(
           d,
           fund,
           news
         );
-
     } catch (e) {
-
       continue;
     }
-
 
     // --------------------------------------------------------
     // DETERMINE MODE
@@ -922,11 +711,9 @@ async function simulate(
     let shouldOpen =
       false;
 
-
     if (
       mode === 'base'
     ) {
-
       const base =
         getBaseActive(
           decision
@@ -934,31 +721,24 @@ async function simulate(
 
       shouldOpen =
         base.active;
-
-    }
-
-    else {
-
+    } else {
       // Quality mode
       shouldOpen =
         decision.decision ===
-        decision.direction &&
+          decision.direction &&
         decision.direction !==
           'WAIT';
     }
 
-
     if (!shouldOpen) {
       continue;
     }
-
 
     // --------------------------------------------------------
     // OPEN
     // --------------------------------------------------------
 
     tradeId++;
-
 
     position =
       openPosition(
@@ -968,12 +748,10 @@ async function simulate(
         tradeId
       );
 
-
     if (!position) {
       continue;
     }
   }
-
 
   // ==========================================================
   // FORCE CLOSE LAST OPEN POSITION
@@ -983,16 +761,13 @@ async function simulate(
     position &&
     m15.length
   ) {
-
     const lastBar =
       m15[m15.length - 1];
-
 
     updateExcursion(
       position,
       lastBar
     );
-
 
     trades.push(
       closePosition(
@@ -1004,7 +779,6 @@ async function simulate(
     );
   }
 
-
   return trades;
 }
 
@@ -1013,31 +787,24 @@ async function simulate(
 // STATISTICS
 // ============================================================
 
-function summarize(
-  trades
-) {
-
+function summarize(trades) {
   const total =
     trades.length;
-
 
   const wins =
     trades.filter(
       t => Number(t.r) > 0
     );
 
-
   const losses =
     trades.filter(
       t => Number(t.r) < 0
     );
 
-
   const breakeven =
     trades.filter(
       t => Number(t.r) === 0
     );
-
 
   const netR =
     trades.reduce(
@@ -1046,14 +813,12 @@ function summarize(
       0
     );
 
-
   const grossProfit =
     wins.reduce(
       (sum, t) =>
         sum + Number(t.r || 0),
       0
     );
-
 
   const grossLoss =
     Math.abs(
@@ -1064,30 +829,22 @@ function summarize(
       )
     );
 
-
   const pf =
     grossLoss > 0
-      ? grossProfit /
-        grossLoss
+      ? grossProfit / grossLoss
       : grossProfit > 0
         ? Infinity
         : 0;
 
-
   const winRate =
     total > 0
-      ? (
-          wins.length /
-          total
-        ) * 100
+      ? (wins.length / total) * 100
       : 0;
-
 
   const avgR =
     total > 0
       ? netR / total
       : 0;
-
 
   // ----------------------------------------------------------
   // EQUITY / MAX DRAWDOWN
@@ -1097,11 +854,9 @@ function summarize(
   let peak = 0;
   let maxDD = 0;
 
-
   for (
     const t of trades
   ) {
-
     equity +=
       Number(t.r || 0);
 
@@ -1118,7 +873,6 @@ function summarize(
       );
   }
 
-
   const durations =
     trades.map(
       t =>
@@ -1127,13 +881,11 @@ function summarize(
         )
     );
 
-
   const mfes =
     trades.map(
       t =>
         Number(t.mfe || 0)
     );
-
 
   const maes =
     trades.map(
@@ -1141,16 +893,13 @@ function summarize(
         Number(t.mae || 0)
     );
 
-
   const rrValues =
     trades.map(
       t =>
         Number(t.rr || 0)
     );
 
-
   return {
-
     total,
 
     wins:
@@ -1163,27 +912,48 @@ function summarize(
       breakeven.length,
 
     winRate:
-      fmt(winRate, 2),
+      fmt(
+        winRate,
+        2
+      ),
 
     netR:
-      fmt(netR, 4),
+      fmt(
+        netR,
+        4
+      ),
 
     grossProfit:
-      fmt(grossProfit, 4),
+      fmt(
+        grossProfit,
+        4
+      ),
 
     grossLoss:
-      fmt(grossLoss, 4),
+      fmt(
+        grossLoss,
+        4
+      ),
 
     profitFactor:
       pf === Infinity
         ? 'INF'
-        : fmt(pf, 3),
+        : fmt(
+            pf,
+            3
+          ),
 
     avgR:
-      fmt(avgR, 4),
+      fmt(
+        avgR,
+        4
+      ),
 
     maxDD:
-      fmt(maxDD, 4),
+      fmt(
+        maxDD,
+        4
+      ),
 
     avgDurationHours:
       durations.length
@@ -1281,44 +1051,36 @@ function groupStats(
   trades,
   getter
 ) {
-
   const groups = {};
-
 
   for (
     const t of trades
   ) {
-
     const key =
       getter(t);
-
 
     if (
       !groups[key]
     ) {
-
       groups[key] = [];
     }
-
 
     groups[key].push(t);
   }
 
-
   const out = {};
-
 
   for (
     const [
       key,
       arr
-    ] of Object.entries(groups)
+    ] of Object.entries(
+      groups
+    )
   ) {
-
     out[key] =
       summarize(arr);
   }
-
 
   return out;
 }
@@ -1332,9 +1094,7 @@ function compareStats(
   base,
   quality
 ) {
-
   return {
-
     tradesDelta:
       quality.total -
       base.total,
@@ -1408,9 +1168,7 @@ function compareStats(
 function qualityBuckets(
   trades
 ) {
-
   const buckets = {
-
     '0-59': [],
     '60-69': [],
     '70-74': [],
@@ -1420,16 +1178,13 @@ function qualityBuckets(
     '90-100': []
   };
 
-
   for (
     const t of trades
   ) {
-
     const q =
       Number(
         t.qualityScore || 0
       );
-
 
     if (q < 60)
       buckets['0-59'].push(t);
@@ -1453,15 +1208,15 @@ function qualityBuckets(
       buckets['90-100'].push(t);
   }
 
-
   return Object.fromEntries(
-    Object.entries(buckets)
-      .map(
-        ([key, arr]) => [
-          key,
-          summarize(arr)
-        ]
-      )
+    Object.entries(
+      buckets
+    ).map(
+      ([key, arr]) => [
+        key,
+        summarize(arr)
+      ]
+    )
   );
 }
 
@@ -1473,50 +1228,42 @@ function qualityBuckets(
 function confidenceBuckets(
   trades
 ) {
-
   const buckets = {
-
     '70-79': [],
     '80-89': [],
     '90-100': []
   };
 
-
   for (
     const t of trades
   ) {
-
     const c =
       Number(
         t.confidence || 0
       );
 
-
-    if (
-      c < 80
-    ) {
+    if (c < 80) {
       buckets['70-79'].push(t);
+    }
 
-    } else if (
-      c < 90
-    ) {
+    else if (c < 90) {
       buckets['80-89'].push(t);
+    }
 
-    } else {
-
+    else {
       buckets['90-100'].push(t);
     }
   }
 
-
   return Object.fromEntries(
-    Object.entries(buckets)
-      .map(
-        ([key, arr]) => [
-          key,
-          summarize(arr)
-        ]
-      )
+    Object.entries(
+      buckets
+    ).map(
+      ([key, arr]) => [
+        key,
+        summarize(arr)
+      ]
+    )
   );
 }
 
@@ -1528,9 +1275,7 @@ function confidenceBuckets(
 function rrBuckets(
   trades
 ) {
-
   const buckets = {
-
     '1.0-1.49': [],
     '1.5-1.99': [],
     '2.0-2.49': [],
@@ -1538,16 +1283,13 @@ function rrBuckets(
     '3.0+': []
   };
 
-
   for (
     const t of trades
   ) {
-
     const rr =
       Number(
         t.rr || 0
       );
-
 
     if (rr < 1.5)
       buckets['1.0-1.49'].push(t);
@@ -1565,15 +1307,15 @@ function rrBuckets(
       buckets['3.0+'].push(t);
   }
 
-
   return Object.fromEntries(
-    Object.entries(buckets)
-      .map(
-        ([key, arr]) => [
-          key,
-          summarize(arr)
-        ]
-      )
+    Object.entries(
+      buckets
+    ).map(
+      ([key, arr]) => [
+        key,
+        summarize(arr)
+      ]
+    )
   );
 }
 
@@ -1581,14 +1323,28 @@ function rrBuckets(
 // ============================================================
 // ROUTE
 // ============================================================
+//
+// IMPORTANT:
+// server.js mounts this router at:
+//
+//   /api/backtest
+//
+// Therefore the route inside this file MUST be:
+//
+//   /
+//
+// Otherwise Express would require:
+//
+//   /api/backtest/api/backtest
+//
+// ============================================================
 
 router.get(
-  '/api/backtest',
+  '/',
   async (req, res) => {
 
     const startedAt =
       Date.now();
-
 
     try {
 
@@ -1602,7 +1358,6 @@ router.get(
           50000
         );
 
-
       const months =
         clamp(
           num(
@@ -1612,7 +1367,6 @@ router.get(
           1,
           12
         );
-
 
       const maxHoldDays =
         clamp(
@@ -1624,7 +1378,6 @@ router.get(
           10
         );
 
-
       const rollingWindow =
         clamp(
           num(
@@ -1635,14 +1388,12 @@ router.get(
           500
         );
 
-
       const maxHoldBars =
         Math.round(
           maxHoldDays *
           24 *
           4
         );
-
 
       const mode =
         (
@@ -1756,7 +1507,6 @@ router.get(
           );
       }
 
-
       else if (
         mode === 'quality'
       ) {
@@ -1773,13 +1523,7 @@ router.get(
           );
       }
 
-
       else {
-
-        // compare mode
-        //
-        // Both simulations run independently over exactly
-        // the same historical candles.
 
         [
           baseTrades,
@@ -1827,12 +1571,10 @@ router.get(
           selectedTrades
         );
 
-
       const baseStats =
         summarize(
           baseTrades
         );
-
 
       const qualityStats =
         summarize(
@@ -1922,7 +1664,7 @@ router.get(
 
 
       // --------------------------------------------------------
-      // DETAILED BREAKDOWNS
+      // BREAKDOWNS
       // --------------------------------------------------------
 
       const direction =
@@ -1931,25 +1673,21 @@ router.get(
           t => t.dir
         );
 
-
       const sessions =
         groupStats(
           selectedTrades,
           t => t.session
         );
 
-
       const confidence =
         confidenceBuckets(
           selectedTrades
         );
 
-
       const quality =
         qualityBuckets(
           selectedTrades
         );
-
 
       const rr =
         rrBuckets(
@@ -2033,30 +1771,16 @@ router.get(
         },
 
 
-        // ------------------------------------------------------
-        // PRIMARY STATS
-        // ------------------------------------------------------
-
         stats,
 
         trades:
           recentTrades,
-
-
-        // ------------------------------------------------------
-        // BASE / QUALITY
-        // ------------------------------------------------------
 
         baseStats,
 
         qualityStats,
 
         comparison,
-
-
-        // ------------------------------------------------------
-        // BREAKDOWNS
-        // ------------------------------------------------------
 
         direction,
 
@@ -2068,10 +1792,6 @@ router.get(
 
         rr,
 
-
-        // ------------------------------------------------------
-        // DIAGNOSTICS
-        // ------------------------------------------------------
 
         diagnostics: {
 
@@ -2124,13 +1844,8 @@ router.get(
         },
 
 
-        // ------------------------------------------------------
-        // DATA DISCLAIMER
-        // ------------------------------------------------------
-
         disclaimer:
           'بک‌تست روی داده تاریخی واقعی اجرا شده است. فاندامنتال و ریسک خبری در این تست خنثی فرض شده‌اند. ورود دقیقاً روی قیمت بسته‌شدن کندل سیگنال شبیه‌سازی شده است و اسپرد، کمیسیون و اسلیپیج لحاظ نشده‌اند.',
-
 
         executionMs:
           Date.now() -
@@ -2143,7 +1858,6 @@ router.get(
         'BACKTEST ERROR:',
         e
       );
-
 
       return res.status(500).json({
 
