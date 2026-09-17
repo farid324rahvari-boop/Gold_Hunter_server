@@ -3,6 +3,12 @@
 // Base = موتور اصلی بدون Quality Filter
 // Quality = موتور اصلی + Quality Filter
 //
+// Diagnostic:
+// - ثبت رأی تک تک 7 استراتژی
+// - تحلیل عملکرد هر استراتژی
+// - تحلیل ترکیب کامل رأی‌ها
+// - تحلیل ترکیب BUY/SELL/NEUTRAL
+//
 // محدودیت‌ها:
 // 1) FRED/Finnhub تاریخی لحظه‌ای در دسترس نیستند.
 // 2) ورود روی Close کندل سیگنال شبیه‌سازی می‌شود.
@@ -44,7 +50,9 @@ function advancePointer(bars, ptr, targetTime) {
 function getBaseActive(signal) {
   if (
     !signal ||
-    !['BUY', 'SELL'].includes(signal.direction)
+    !['BUY', 'SELL'].includes(
+      signal.direction
+    )
   ) {
     return false;
   }
@@ -510,6 +518,27 @@ function simulate(
           signal.trade.rr || 0
         ),
 
+      /*
+       * Diagnostic:
+       * رأی هر 7 استراتژی
+       */
+      strategyVotes:
+        signal.strategyVotes || {},
+
+      /*
+       * Diagnostic:
+       * ترکیب کامل رأی‌ها
+       */
+      strategyKey:
+        signal.strategyKey || '',
+
+      /*
+       * Diagnostic:
+       * جزئیات رأی‌ها
+       */
+      strategyVoteDetails:
+        signal.strategyVoteDetails || [],
+
       mfe: 0,
 
       mae: 0,
@@ -946,10 +975,6 @@ function confidenceStats(
   );
 }
 
-/*
- * اسم تابع تغییر کرد تا با
- * qualitySummary تداخل نداشته باشد.
- */
 function qualityBucketStats(
   trades
 ) {
@@ -1006,6 +1031,222 @@ function rrStats(
   );
 }
 
+/*
+ * --------------------------------------------------
+ * عملکرد تک تک 7 استراتژی
+ * --------------------------------------------------
+ */
+function strategyStats(trades) {
+  const strategyNames = [
+    'روند چندتایم‌فریمی',
+    'ساختار بازار (BOS/CHoCH)',
+    'Liquidity Sweep (SMC)',
+    'مومنتوم (RSI + EMA20)',
+    'Fibonacci Retracement',
+    'واگرایی RSI',
+    'فاندامنتال (FRED)'
+  ];
+
+  const result = {};
+
+  for (const name of strategyNames) {
+    const buckets = {
+      BUY: [],
+      SELL: [],
+      NEUTRAL: []
+    };
+
+    for (const t of trades) {
+      const vote =
+        t.strategyVotes?.[name] ||
+        'NEUTRAL';
+
+      if (!buckets[vote]) {
+        buckets[vote] = [];
+      }
+
+      buckets[vote].push(t);
+    }
+
+    result[name] = {
+      BUY:
+        summarize(buckets.BUY),
+
+      SELL:
+        summarize(buckets.SELL),
+
+      NEUTRAL:
+        summarize(buckets.NEUTRAL)
+    };
+  }
+
+  return result;
+}
+
+/*
+ * --------------------------------------------------
+ * ترکیب کامل رأی‌های 7 استراتژی
+ * --------------------------------------------------
+ */
+function strategyCombinationStats(trades) {
+  const groups = {};
+
+  for (const t of trades) {
+    const votes =
+      t.strategyVotes || {};
+
+    const key = [
+      votes['روند چندتایم‌فریمی'] || 'NEUTRAL',
+      votes['ساختار بازار (BOS/CHoCH)'] || 'NEUTRAL',
+      votes['Liquidity Sweep (SMC)'] || 'NEUTRAL',
+      votes['مومنتوم (RSI + EMA20)'] || 'NEUTRAL',
+      votes['Fibonacci Retracement'] || 'NEUTRAL',
+      votes['واگرایی RSI'] || 'NEUTRAL',
+      votes['فاندامنتال (FRED)'] || 'NEUTRAL'
+    ].join(' + ');
+
+    if (!groups[key]) {
+      groups[key] = [];
+    }
+
+    groups[key].push(t);
+  }
+
+  const result = {};
+
+  for (
+    const [key, items]
+    of Object.entries(groups)
+  ) {
+    result[key] = {
+      ...summarize(items),
+
+      direction:
+        items[0]?.dir || null,
+
+      sample:
+        items.length
+    };
+  }
+
+  return result;
+}
+
+/*
+ * --------------------------------------------------
+ * ترکیب تعداد BUY / SELL / NEUTRAL
+ * --------------------------------------------------
+ *
+ * مثال:
+ * 4 BUY / 1 SELL / 2 NEUTRAL
+ */
+function consensusCompositionStats(trades) {
+  const groups = {};
+
+  for (const t of trades) {
+    const votes =
+      t.strategyVotes || {};
+
+    const values =
+      Object.values(votes);
+
+    const buy =
+      values.filter(
+        v => v === 'BUY'
+      ).length;
+
+    const sell =
+      values.filter(
+        v => v === 'SELL'
+      ).length;
+
+    const neutral =
+      values.filter(
+        v => v === 'NEUTRAL'
+      ).length;
+
+    const key =
+      `${buy} BUY / ${sell} SELL / ${neutral} NEUTRAL`;
+
+    if (!groups[key]) {
+      groups[key] = [];
+    }
+
+    groups[key].push(t);
+  }
+
+  const result = {};
+
+  for (
+    const [key, items]
+    of Object.entries(groups)
+  ) {
+    result[key] = {
+      ...summarize(items),
+
+      sample:
+        items.length
+    };
+  }
+
+  return result;
+}
+
+/*
+ * --------------------------------------------------
+ * تحلیل عملکرد استراتژی در معاملات BUY و SELL
+ * --------------------------------------------------
+ */
+function strategyDirectionStats(trades) {
+  const result = {};
+
+  const strategyNames = [
+    'روند چندتایم‌فریمی',
+    'ساختار بازار (BOS/CHoCH)',
+    'Liquidity Sweep (SMC)',
+    'مومنتوم (RSI + EMA20)',
+    'Fibonacci Retracement',
+    'واگرایی RSI',
+    'فاندامنتال (FRED)'
+  ];
+
+  for (const name of strategyNames) {
+    result[name] = {
+      BUY: summarize(
+        trades.filter(
+          t =>
+            t.dir === 'BUY' &&
+            t.strategyVotes?.[name] === 'BUY'
+        )
+      ),
+
+      SELL: summarize(
+        trades.filter(
+          t =>
+            t.dir === 'SELL' &&
+            t.strategyVotes?.[name] === 'SELL'
+        )
+      ),
+
+      AGAINST: summarize(
+        trades.filter(
+          t =>
+            (
+              t.dir === 'BUY' &&
+              t.strategyVotes?.[name] === 'SELL'
+            ) ||
+            (
+              t.dir === 'SELL' &&
+              t.strategyVotes?.[name] === 'BUY'
+            )
+        )
+      )
+    };
+  }
+
+  return result;
+}
+
 function cleanTrades(
   trades
 ) {
@@ -1052,6 +1293,18 @@ function cleanTrades(
 
       qualityGrade:
         t.qualityGrade,
+
+      /*
+       * رأی 7 استراتژی
+       */
+      strategyVotes:
+        t.strategyVotes || {},
+
+      /*
+       * ترکیب رأی‌ها
+       */
+      strategyKey:
+        t.strategyKey || '',
 
       session:
         t.session,
@@ -1383,6 +1636,29 @@ router.get(
           months
       };
 
+      /*
+       * Diagnostic summaries
+       */
+      const selectedStrategyStats =
+        strategyStats(
+          selectedTrades
+        );
+
+      const selectedStrategyDirectionStats =
+        strategyDirectionStats(
+          selectedTrades
+        );
+
+      const selectedCombinationStats =
+        strategyCombinationStats(
+          selectedTrades
+        );
+
+      const selectedConsensusComposition =
+        consensusCompositionStats(
+          selectedTrades
+        );
+
       return res.json({
         ok: true,
 
@@ -1449,6 +1725,24 @@ router.get(
             selectedTrades
           ),
 
+        /*
+         * ------------------------------------------
+         * DIAGNOSTICS
+         * ------------------------------------------
+         */
+
+        strategyStats:
+          selectedStrategyStats,
+
+        strategyDirectionStats:
+          selectedStrategyDirectionStats,
+
+        strategyCombinations:
+          selectedCombinationStats,
+
+        consensusComposition:
+          selectedConsensusComposition,
+
         trades:
           cleanTrades(
             selectedTrades
@@ -1471,7 +1765,13 @@ router.get(
             m15.length,
 
           requestedHistoricalBars:
-            fetchBars
+            fetchBars,
+
+          strategyCount:
+            7,
+
+          diagnosticEnabled:
+            true
         }
       });
 
