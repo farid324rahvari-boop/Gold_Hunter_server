@@ -38,7 +38,6 @@ function historyMeta(tf, bars) {
 
 function independentActive(signal, ignoreQuality) {
   if (!signal || !['BUY', 'SELL'].includes(signal.decision)) return false;
-  if (!ignoreQuality) return true;
   return true;
 }
 
@@ -56,15 +55,20 @@ function updateMFE(position, bar) {
 
 function simulateIndependent(m15, h1, h4, daily, rollingWindow, maxHoldBars, mode) {
   let h1Ptr = 0, h4Ptr = 0, dPtr = 0;
-  const positions = new Map();
+  let position = null;
   const trades = [];
   const startIdx = Math.max(rollingWindow, 100);
   const applyQuality = mode === 'quality';
+  const ID_TO_NAME = {
+    TREND_FOLLOWING: 'روند چندتایم‌فریمی', STRUCTURE: 'ساختار بازار (BOS/CHoCH)',
+    LIQUIDITY_SWEEP: 'Liquidity Sweep (SMC)', MOMENTUM: 'مومنتوم (RSI + EMA20)',
+    FIBONACCI: 'Fibonacci Retracement', RSI_DIVERGENCE: 'واگرایی RSI', FUNDAMENTAL: 'فاندامنتال (FRED)'
+  };
 
-  function closePosition(id, position, bar, result, r) {
-    const exit = result === 'LOSS' ? position.sl : (result === 'WIN' ? position.tp1 : bar.close);
-    trades.push({ ...position, exit, exitTime: bar.time, result, r: fmtR(r) });
-    positions.delete(id);
+  function closePosition(pos, bar, result, r) {
+    const exit = result === 'LOSS' ? pos.sl : (result === 'WIN' ? pos.tp1 : bar.close);
+    trades.push({ ...pos, exit, exitTime: bar.time, result, r: fmtR(r) });
+    position = null;
   }
 
   for (let i = startIdx; i < m15.length; i++) {
@@ -74,24 +78,29 @@ function simulateIndependent(m15, h1, h4, daily, rollingWindow, maxHoldBars, mod
     dPtr = advancePointer(daily, dPtr, bar.time);
     if (h1Ptr < 30 || h4Ptr < 30 || dPtr < 20) continue;
 
-    // Manage each strategy's own position independently.
-    for (const [id, position] of Array.from(positions.entries())) {
+    if (position) {
       updateMFE(position, bar);
       const age = i - position.openIndex;
       const hitSL = position.dir === 'BUY' ? bar.low <= position.sl : bar.high >= position.sl;
       const hitTP = position.dir === 'BUY' ? bar.high >= position.tp1 : bar.low <= position.tp1;
-      if (hitSL) { closePosition(id, position, bar, 'LOSS', -1); continue; }
+      if (hitSL) { closePosition(position, bar, 'LOSS', -1); continue; }
       if (hitTP) {
         const reward = Math.abs(position.tp1 - position.entry);
-        closePosition(id, position, bar, 'WIN', position.riskDist > 0 ? reward / position.riskDist : 0);
+        closePosition(position, bar, 'WIN', position.riskDist > 0 ? reward / position.riskDist : 0);
         continue;
       }
       if (age >= maxHoldBars) {
         const pl = position.dir === 'BUY' ? bar.close - position.entry : position.entry - bar.close;
         const r = position.riskDist > 0 ? pl / position.riskDist : 0;
-        closePosition(id, position, bar, r >= 0 ? 'TIMEOUT_WIN' : 'TIMEOUT_LOSS', r);
+        closePosition(position, bar, r >= 0 ? 'TIMEOUT_WIN' : 'TIMEOUT_LOSS', r);
+        continue;
       }
     }
+
+    // One market opportunity = one master trade. Strategies remain independent
+    // voters/research engines, but their overlapping triggers are NOT duplicated
+    // into separate positions. The strongest eligible trigger owns the trade.
+    if (position) continue;
 
     const m15Window = m15.slice(Math.max(0, i - rollingWindow + 1), i + 1);
     const h1Window = h1.slice(Math.max(0, h1Ptr - rollingWindow + 1), h1Ptr + 1);
@@ -105,42 +114,62 @@ function simulateIndependent(m15, h1, h4, daily, rollingWindow, maxHoldBars, mod
       result = engine.getIndependentSignals(data, engine.neutralFundamental(), engine.neutralNewsRisk());
     } catch (_) { continue; }
 
+    const candidates = [];
     for (const signal of result.active || []) {
-      const id = signal.strategyId;
-      if (!id || positions.has(id)) continue;
+      if (!signal || !['BUY','SELL'].includes(signal.direction)) continue;
       const confidence = Number(signal.confidence || 0);
+      if (confidence < Number(engine.MIN_CONFIDENCE || 72)) continue;
       const rr = Number(signal.rr || 0);
-      if (applyQuality) {
-        const quality = typeof engine.evaluateIndependentQuality === 'function'
-          ? engine.evaluateIndependentQuality(signal, data, result)
-          : { tradable: confidence >= engine.MIN_CONFIDENCE && rr >= engine.MIN_RR, score: confidence, grade: 'LEGACY' };
+      if (rr < Number(engine.MIN_RR || 1.8)) continue;
+      let quality = { tradable:true, score:confidence, grade:'LEGACY', reasons:[], blockers:[] };
+      if (applyQuality && typeof engine.evaluateIndependentQuality === 'function') {
+        quality = engine.evaluateIndependentQuality(signal, data, result);
         if (!quality.tradable) continue;
-        signal._quality = quality;
       }
-      if (!['BUY','SELL'].includes(signal.direction)) continue;
+      const sl = Number(signal.stopLoss), tp1 = Number(signal.targets?.[0]);
       const entry = bar.close;
-      const sl = Number(signal.stopLoss);
-      const tp1 = Number(signal.targets?.[0]);
       const riskDist = Math.abs(entry - sl);
       if (!Number.isFinite(riskDist) || riskDist <= 0 || !Number.isFinite(tp1)) continue;
-      const votes = {};
-      for (const s of (result.strategies || [])) if (s?.strategyId) votes[s.strategyId] = s.vote || s.direction || 'NEUTRAL';
-      positions.set(id, {
-        dir: signal.direction, entry, sl, tp1, openIndex: i, openTime: bar.time,
-        confidence, agreeCount: (result.active || []).length, totalCount: 7,
-        qualityScore: signal._quality?.score ?? confidence, qualityGrade: signal._quality?.grade || (confidence >= 85 ? 'EXCELLENT' : confidence >= 75 ? 'GOOD' : confidence >= 65 ? 'FAIR' : 'POOR'),
-        session: engine.getSession(bar.time), rr, strategyVotes: votes, strategyKey: id, strategyId: id,
-        strategyStatus: signal.status, strategyName: signal.name, mfe: 0, mae: 0, riskDist
-      });
+      candidates.push({ signal, quality, confidence, rr, entry, sl, tp1, riskDist });
     }
+    if (!candidates.length) continue;
+
+    // Prefer quality first, then confidence, then R:R. This is selection, not
+    // a 4/7 consensus gate, so signals do not become unnecessarily rare.
+    candidates.sort((a,b) =>
+      Number(b.quality.score || 0) - Number(a.quality.score || 0) ||
+      b.confidence - a.confidence || b.rr - a.rr
+    );
+    const c = candidates[0];
+    const signal = c.signal;
+    const votes = {};
+    for (const st of (result.strategies || [])) {
+      if (!st?.strategyId) continue;
+      const vote = st.vote || st.direction || 'NEUTRAL';
+      votes[st.strategyId] = vote;
+      if (ID_TO_NAME[st.strategyId]) votes[ID_TO_NAME[st.strategyId]] = vote;
+    }
+    const buyVotes = Object.entries(votes).filter(([k]) => ID_TO_NAME[k]).filter(([,v])=>v==='BUY').length;
+    const sellVotes = Object.entries(votes).filter(([k]) => ID_TO_NAME[k]).filter(([,v])=>v==='SELL').length;
+    const agreeCount = signal.direction === 'BUY' ? buyVotes : sellVotes;
+
+    position = {
+      dir: signal.direction, entry:c.entry, sl:c.sl, tp1:c.tp1, openIndex:i, openTime:bar.time,
+      confidence:c.confidence, agreeCount, totalCount:7,
+      qualityScore:c.quality.score ?? c.confidence, qualityGrade:c.quality.grade || 'POOR',
+      session:engine.getSession(bar.time), rr:c.rr, strategyVotes:votes,
+      strategyKey:signal.strategyId, strategyId:signal.strategyId,
+      strategyStatus:signal.status, strategyName:signal.name, mfe:0, mae:0, riskDist:c.riskDist,
+      candidateCount:candidates.length
+    };
   }
 
-  for (const [id, position] of positions) {
+  if (position) {
     const lastBar = m15[m15.length - 1];
     updateMFE(position, lastBar);
     const pl = position.dir === 'BUY' ? lastBar.close - position.entry : position.entry - lastBar.close;
     const r = position.riskDist > 0 ? pl / position.riskDist : 0;
-    trades.push({ ...position, exit: lastBar.close, exitTime: lastBar.time, result: r >= 0 ? 'OPEN_WIN' : 'OPEN_LOSS', r: fmtR(r) });
+    trades.push({ ...position, exit:lastBar.close, exitTime:lastBar.time, result:r>=0?'OPEN_WIN':'OPEN_LOSS', r:fmtR(r) });
   }
   return trades;
 }
