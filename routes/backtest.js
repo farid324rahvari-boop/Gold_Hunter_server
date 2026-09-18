@@ -54,6 +54,91 @@ function updateMFE(position, bar) {
   position.mae = Math.min(position.mae || 0, mae);
 }
 
+function simulateIndependent(m15, h1, h4, daily, rollingWindow, maxHoldBars, mode) {
+  let h1Ptr = 0, h4Ptr = 0, dPtr = 0;
+  const positions = new Map();
+  const trades = [];
+  const startIdx = Math.max(rollingWindow, 100);
+  const applyQuality = mode === 'quality';
+
+  function closePosition(id, position, bar, result, r) {
+    const exit = result === 'LOSS' ? position.sl : (result === 'WIN' ? position.tp1 : bar.close);
+    trades.push({ ...position, exit, exitTime: bar.time, result, r: fmtR(r) });
+    positions.delete(id);
+  }
+
+  for (let i = startIdx; i < m15.length; i++) {
+    const bar = m15[i];
+    h1Ptr = advancePointer(h1, h1Ptr, bar.time);
+    h4Ptr = advancePointer(h4, h4Ptr, bar.time);
+    dPtr = advancePointer(daily, dPtr, bar.time);
+    if (h1Ptr < 30 || h4Ptr < 30 || dPtr < 20) continue;
+
+    // Manage each strategy's own position independently.
+    for (const [id, position] of Array.from(positions.entries())) {
+      updateMFE(position, bar);
+      const age = i - position.openIndex;
+      const hitSL = position.dir === 'BUY' ? bar.low <= position.sl : bar.high >= position.sl;
+      const hitTP = position.dir === 'BUY' ? bar.high >= position.tp1 : bar.low <= position.tp1;
+      if (hitSL) { closePosition(id, position, bar, 'LOSS', -1); continue; }
+      if (hitTP) {
+        const reward = Math.abs(position.tp1 - position.entry);
+        closePosition(id, position, bar, 'WIN', position.riskDist > 0 ? reward / position.riskDist : 0);
+        continue;
+      }
+      if (age >= maxHoldBars) {
+        const pl = position.dir === 'BUY' ? bar.close - position.entry : position.entry - bar.close;
+        const r = position.riskDist > 0 ? pl / position.riskDist : 0;
+        closePosition(id, position, bar, r >= 0 ? 'TIMEOUT_WIN' : 'TIMEOUT_LOSS', r);
+      }
+    }
+
+    const m15Window = m15.slice(Math.max(0, i - rollingWindow + 1), i + 1);
+    const h1Window = h1.slice(Math.max(0, h1Ptr - rollingWindow + 1), h1Ptr + 1);
+    const h4Window = h4.slice(Math.max(0, h4Ptr - rollingWindow + 1), h4Ptr + 1);
+    const dWindow = daily.slice(Math.max(0, dPtr - rollingWindow + 1), dPtr + 1);
+    if (h1Window.length < 30 || h4Window.length < 30 || dWindow.length < 20) continue;
+
+    let data, result;
+    try {
+      data = { m15: engine.analyze(m15Window), h1: engine.analyze(h1Window), h4: engine.analyze(h4Window), daily: engine.analyze(dWindow) };
+      result = engine.getIndependentSignals(data, engine.neutralFundamental(), engine.neutralNewsRisk());
+    } catch (_) { continue; }
+
+    for (const signal of result.active || []) {
+      const id = signal.strategyId;
+      if (!id || positions.has(id)) continue;
+      const confidence = Number(signal.confidence || 0);
+      const rr = Number(signal.rr || 0);
+      if (applyQuality && (confidence < engine.MIN_CONFIDENCE || rr < engine.MIN_RR)) continue;
+      if (!['BUY','SELL'].includes(signal.direction)) continue;
+      const entry = bar.close;
+      const sl = Number(signal.stopLoss);
+      const tp1 = Number(signal.targets?.[0]);
+      const riskDist = Math.abs(entry - sl);
+      if (!Number.isFinite(riskDist) || riskDist <= 0 || !Number.isFinite(tp1)) continue;
+      const votes = {};
+      for (const s of (result.strategies || [])) if (s?.strategyId) votes[s.strategyId] = s.vote || s.direction || 'NEUTRAL';
+      positions.set(id, {
+        dir: signal.direction, entry, sl, tp1, openIndex: i, openTime: bar.time,
+        confidence, agreeCount: (result.active || []).length, totalCount: 7,
+        qualityScore: confidence, qualityGrade: confidence >= 85 ? 'EXCELLENT' : confidence >= 75 ? 'GOOD' : confidence >= 65 ? 'FAIR' : 'POOR',
+        session: engine.getSession(bar.time), rr, strategyVotes: votes, strategyKey: id, strategyId: id,
+        strategyStatus: signal.status, strategyName: signal.name, mfe: 0, mae: 0, riskDist
+      });
+    }
+  }
+
+  for (const [id, position] of positions) {
+    const lastBar = m15[m15.length - 1];
+    updateMFE(position, lastBar);
+    const pl = position.dir === 'BUY' ? lastBar.close - position.entry : position.entry - lastBar.close;
+    const r = position.riskDist > 0 ? pl / position.riskDist : 0;
+    trades.push({ ...position, exit: lastBar.close, exitTime: lastBar.time, result: r >= 0 ? 'OPEN_WIN' : 'OPEN_LOSS', r: fmtR(r) });
+  }
+  return trades;
+}
+
 function simulate(m15, h1, h4, daily, rollingWindow, maxHoldBars, mode) {
   let h1Ptr = 0, h4Ptr = 0, dPtr = 0;
   let position = null;
@@ -277,6 +362,20 @@ function strategyStats(trades) {
   return result;
 }
 
+function strategyTriggerStats(trades) {
+  const result = {};
+  for (const name of STRATEGY_NAMES) {
+    const idMap = {
+      'روند چندتایم‌فریمی':'TREND_FOLLOWING', 'ساختار بازار (BOS/CHoCH)':'STRUCTURE',
+      'Liquidity Sweep (SMC)':'LIQUIDITY_SWEEP', 'مومنتوم (RSI + EMA20)':'MOMENTUM',
+      'Fibonacci Retracement':'FIBONACCI', 'واگرایی RSI':'RSI_DIVERGENCE', 'فاندامنتال (FRED)':'FUNDAMENTAL'
+    };
+    const items = trades.filter(t => t.strategyId === idMap[name]);
+    result[name] = summarize(items);
+  }
+  return result;
+}
+
 function strategyCombinationStats(trades) {
   const groups = {};
   for (const t of trades) {
@@ -341,7 +440,7 @@ router.get('/', async (req, res) => {
   const rollingWindow = Math.max(100, Math.min(Number(req.query.rollingWindow) || 220, 500));
   const maxHoldDays = Math.max(1, Math.min(Number(req.query.maxHoldDays) || 3, 10));
   const maxHoldBars = maxHoldDays * 24 * 4;
-  const mode = ['base', 'quality', 'compare'].includes(String(req.query.mode || 'compare').toLowerCase())
+  const mode = ['base', 'quality', 'compare', 'independent'].includes(String(req.query.mode || 'compare').toLowerCase())
     ? String(req.query.mode || 'compare').toLowerCase()
     : 'compare';
 
@@ -384,17 +483,21 @@ router.get('/', async (req, res) => {
 
     let baseTrades = [];
     let qualityTrades = [];
+    let independentTrades = [];
     if (mode === 'base' || mode === 'compare') {
       baseTrades = simulate(testM15, h1, h4, daily, rollingWindow, maxHoldBars, 'base');
     }
     if (mode === 'quality' || mode === 'compare') {
       qualityTrades = simulate(testM15, h1, h4, daily, rollingWindow, maxHoldBars, 'quality');
     }
+    if (mode === 'independent') {
+      independentTrades = simulateIndependent(testM15, h1, h4, daily, rollingWindow, maxHoldBars, 'quality');
+    }
 
     const baseSummary = summarize(baseTrades);
     const qualitySummary = summarize(qualityTrades);
-    const selectedTrades = mode === 'base' ? baseTrades : qualityTrades;
-    const selectedStats = mode === 'base' ? baseSummary : qualitySummary;
+    const selectedTrades = mode === 'base' ? baseTrades : mode === 'quality' || mode === 'compare' ? qualityTrades : independentTrades;
+    const selectedStats = mode === 'base' ? baseSummary : mode === 'quality' || mode === 'compare' ? qualitySummary : summarize(independentTrades);
 
     const comparison = {
       baseTrades: baseSummary.total,
@@ -466,10 +569,12 @@ router.get('/', async (req, res) => {
         return '3+';
       }),
       strategyStats: strategyStats(selectedTrades),
+      triggerStats: strategyTriggerStats(selectedTrades),
       strategyCombinations: strategyCombinationStats(selectedTrades),
       consensusComposition: consensusCompositionStats(selectedTrades),
       trades: cleanTrades(selectedTrades),
       diagnostics: {
+        independentTradeCount: independentTrades.length,
         baseTradeCount: baseTrades.length,
         qualityTradeCount: qualityTrades.length,
         qualityRetention: comparison.retention,
@@ -479,6 +584,8 @@ router.get('/', async (req, res) => {
         testBars: testM15.length,
         strategyCount: 7,
         independentArchitecture: true,
+        independentBacktestMode: mode === 'independent',
+        concurrentStrategyPositions: mode === 'independent',
         activeStrategyEngines: ['TREND_FOLLOWING', 'STRUCTURE', 'LIQUIDITY_SWEEP', 'MOMENTUM', 'FIBONACCI', 'RSI_DIVERGENCE', 'FUNDAMENTAL'],
         diagnosticOnlyStrategies: [],
         history
