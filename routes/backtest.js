@@ -3,7 +3,8 @@
 // - No weighted consensus is used to activate a trade.
 // - Base = independent strategy trigger without the Quality layer.
 // - Quality = same independent trigger + Quality layer.
-// - All implemented strategy engines can independently trigger; no consensus is required.
+// - At the moment Trend Following is the first strategy allowed to trigger;
+//   the other strategies remain diagnostics until their independent engines exist.
 // - Historical pagination diagnostics are preserved explicitly.
 // - Entry is simulated at the signal candle Close.
 // - FRED/News are neutral in historical mode.
@@ -38,6 +39,7 @@ function historyMeta(tf, bars) {
 
 function independentActive(signal, ignoreQuality) {
   if (!signal || !['BUY', 'SELL'].includes(signal.decision)) return false;
+  if (!ignoreQuality) return true;
   return true;
 }
 
@@ -51,127 +53,6 @@ function updateMFE(position, bar) {
     : (position.entry - bar.high) / position.riskDist;
   position.mfe = Math.max(position.mfe || 0, mfe);
   position.mae = Math.min(position.mae || 0, mae);
-}
-
-function simulateIndependent(m15, h1, h4, daily, rollingWindow, maxHoldBars, mode) {
-  let h1Ptr = 0, h4Ptr = 0, dPtr = 0;
-  let position = null;
-  const trades = [];
-  const startIdx = Math.max(rollingWindow, 100);
-  const applyQuality = mode === 'quality';
-  const ID_TO_NAME = {
-    TREND_FOLLOWING: 'روند چندتایم‌فریمی', STRUCTURE: 'ساختار بازار (BOS/CHoCH)',
-    LIQUIDITY_SWEEP: 'Liquidity Sweep (SMC)', MOMENTUM: 'مومنتوم (RSI + EMA20)',
-    FIBONACCI: 'Fibonacci Retracement', RSI_DIVERGENCE: 'واگرایی RSI', FUNDAMENTAL: 'فاندامنتال (FRED)'
-  };
-
-  function closePosition(pos, bar, result, r) {
-    const exit = result === 'LOSS' ? pos.sl : (result === 'WIN' ? pos.tp1 : bar.close);
-    trades.push({ ...pos, exit, exitTime: bar.time, result, r: fmtR(r) });
-    position = null;
-  }
-
-  for (let i = startIdx; i < m15.length; i++) {
-    const bar = m15[i];
-    h1Ptr = advancePointer(h1, h1Ptr, bar.time);
-    h4Ptr = advancePointer(h4, h4Ptr, bar.time);
-    dPtr = advancePointer(daily, dPtr, bar.time);
-    if (h1Ptr < 30 || h4Ptr < 30 || dPtr < 20) continue;
-
-    if (position) {
-      updateMFE(position, bar);
-      const age = i - position.openIndex;
-      const hitSL = position.dir === 'BUY' ? bar.low <= position.sl : bar.high >= position.sl;
-      const hitTP = position.dir === 'BUY' ? bar.high >= position.tp1 : bar.low <= position.tp1;
-      if (hitSL) { closePosition(position, bar, 'LOSS', -1); continue; }
-      if (hitTP) {
-        const reward = Math.abs(position.tp1 - position.entry);
-        closePosition(position, bar, 'WIN', position.riskDist > 0 ? reward / position.riskDist : 0);
-        continue;
-      }
-      if (age >= maxHoldBars) {
-        const pl = position.dir === 'BUY' ? bar.close - position.entry : position.entry - bar.close;
-        const r = position.riskDist > 0 ? pl / position.riskDist : 0;
-        closePosition(position, bar, r >= 0 ? 'TIMEOUT_WIN' : 'TIMEOUT_LOSS', r);
-        continue;
-      }
-    }
-
-    // One market opportunity = one master trade. Strategies remain independent
-    // voters/research engines, but their overlapping triggers are NOT duplicated
-    // into separate positions. The strongest eligible trigger owns the trade.
-    if (position) continue;
-
-    const m15Window = m15.slice(Math.max(0, i - rollingWindow + 1), i + 1);
-    const h1Window = h1.slice(Math.max(0, h1Ptr - rollingWindow + 1), h1Ptr + 1);
-    const h4Window = h4.slice(Math.max(0, h4Ptr - rollingWindow + 1), h4Ptr + 1);
-    const dWindow = daily.slice(Math.max(0, dPtr - rollingWindow + 1), dPtr + 1);
-    if (h1Window.length < 30 || h4Window.length < 30 || dWindow.length < 20) continue;
-
-    let data, result;
-    try {
-      data = { m15: engine.analyze(m15Window), h1: engine.analyze(h1Window), h4: engine.analyze(h4Window), daily: engine.analyze(dWindow) };
-      result = engine.getIndependentSignals(data, engine.neutralFundamental(), engine.neutralNewsRisk());
-    } catch (_) { continue; }
-
-    const candidates = [];
-    for (const signal of result.active || []) {
-      if (!signal || !['BUY','SELL'].includes(signal.direction)) continue;
-      const confidence = Number(signal.confidence || 0);
-      if (confidence < Number(engine.MIN_CONFIDENCE || 72)) continue;
-      const rr = Number(signal.rr || 0);
-      if (rr < Number(engine.MIN_RR || 1.8)) continue;
-      let quality = { tradable:true, score:confidence, grade:'LEGACY', reasons:[], blockers:[] };
-      if (applyQuality && typeof engine.evaluateIndependentQuality === 'function') {
-        quality = engine.evaluateIndependentQuality(signal, data, result);
-        if (!quality.tradable) continue;
-      }
-      const sl = Number(signal.stopLoss), tp1 = Number(signal.targets?.[0]);
-      const entry = bar.close;
-      const riskDist = Math.abs(entry - sl);
-      if (!Number.isFinite(riskDist) || riskDist <= 0 || !Number.isFinite(tp1)) continue;
-      candidates.push({ signal, quality, confidence, rr, entry, sl, tp1, riskDist });
-    }
-    if (!candidates.length) continue;
-
-    // Prefer quality first, then confidence, then R:R. This is selection, not
-    // a 4/7 consensus gate, so signals do not become unnecessarily rare.
-    candidates.sort((a,b) =>
-      Number(b.quality.score || 0) - Number(a.quality.score || 0) ||
-      b.confidence - a.confidence || b.rr - a.rr
-    );
-    const c = candidates[0];
-    const signal = c.signal;
-    const votes = {};
-    for (const st of (result.strategies || [])) {
-      if (!st?.strategyId) continue;
-      const vote = st.vote || st.direction || 'NEUTRAL';
-      votes[st.strategyId] = vote;
-      if (ID_TO_NAME[st.strategyId]) votes[ID_TO_NAME[st.strategyId]] = vote;
-    }
-    const buyVotes = Object.entries(votes).filter(([k]) => ID_TO_NAME[k]).filter(([,v])=>v==='BUY').length;
-    const sellVotes = Object.entries(votes).filter(([k]) => ID_TO_NAME[k]).filter(([,v])=>v==='SELL').length;
-    const agreeCount = signal.direction === 'BUY' ? buyVotes : sellVotes;
-
-    position = {
-      dir: signal.direction, entry:c.entry, sl:c.sl, tp1:c.tp1, openIndex:i, openTime:bar.time,
-      confidence:c.confidence, agreeCount, totalCount:7,
-      qualityScore:c.quality.score ?? c.confidence, qualityGrade:c.quality.grade || 'POOR',
-      session:engine.getSession(bar.time), rr:c.rr, strategyVotes:votes,
-      strategyKey:signal.strategyId, strategyId:signal.strategyId,
-      strategyStatus:signal.status, strategyName:signal.name, mfe:0, mae:0, riskDist:c.riskDist,
-      candidateCount:candidates.length
-    };
-  }
-
-  if (position) {
-    const lastBar = m15[m15.length - 1];
-    updateMFE(position, lastBar);
-    const pl = position.dir === 'BUY' ? lastBar.close - position.entry : position.entry - lastBar.close;
-    const r = position.riskDist > 0 ? pl / position.riskDist : 0;
-    trades.push({ ...position, exit:lastBar.close, exitTime:lastBar.time, result:r>=0?'OPEN_WIN':'OPEN_LOSS', r:fmtR(r) });
-  }
-  return trades;
 }
 
 function simulate(m15, h1, h4, daily, rollingWindow, maxHoldBars, mode) {
@@ -397,20 +278,6 @@ function strategyStats(trades) {
   return result;
 }
 
-function strategyTriggerStats(trades) {
-  const result = {};
-  for (const name of STRATEGY_NAMES) {
-    const idMap = {
-      'روند چندتایم‌فریمی':'TREND_FOLLOWING', 'ساختار بازار (BOS/CHoCH)':'STRUCTURE',
-      'Liquidity Sweep (SMC)':'LIQUIDITY_SWEEP', 'مومنتوم (RSI + EMA20)':'MOMENTUM',
-      'Fibonacci Retracement':'FIBONACCI', 'واگرایی RSI':'RSI_DIVERGENCE', 'فاندامنتال (FRED)':'FUNDAMENTAL'
-    };
-    const items = trades.filter(t => t.strategyId === idMap[name]);
-    result[name] = summarize(items);
-  }
-  return result;
-}
-
 function strategyCombinationStats(trades) {
   const groups = {};
   for (const t of trades) {
@@ -465,19 +332,7 @@ function cleanTrades(trades) {
   }));
 }
 
-router.get('/report', (req, res) => {
-  const q = new URLSearchParams({
-    mode: String(req.query.mode || 'independent'),
-    bars: String(req.query.bars || '10000'),
-    report: 'summary'
-  });
-  if (req.query.months != null) q.set('months', String(req.query.months));
-  if (req.query.rollingWindow != null) q.set('rollingWindow', String(req.query.rollingWindow));
-  if (req.query.maxHoldDays != null) q.set('maxHoldDays', String(req.query.maxHoldDays));
-  res.redirect('./?' + q.toString());
-});
-
-router.get('/', async (req, res) => {
+async function runBacktest(req, res) {
   if (!process.env.TWELVEDATA_API_KEY) {
     return res.json({ status: 'UNAVAILABLE', error: 'no-api-key-configured' });
   }
@@ -487,7 +342,7 @@ router.get('/', async (req, res) => {
   const rollingWindow = Math.max(100, Math.min(Number(req.query.rollingWindow) || 220, 500));
   const maxHoldDays = Math.max(1, Math.min(Number(req.query.maxHoldDays) || 3, 10));
   const maxHoldBars = maxHoldDays * 24 * 4;
-  const mode = ['base', 'quality', 'compare', 'independent'].includes(String(req.query.mode || 'compare').toLowerCase())
+  const mode = ['base', 'quality', 'compare'].includes(String(req.query.mode || 'compare').toLowerCase())
     ? String(req.query.mode || 'compare').toLowerCase()
     : 'compare';
 
@@ -530,24 +385,17 @@ router.get('/', async (req, res) => {
 
     let baseTrades = [];
     let qualityTrades = [];
-    let independentTrades = [];
     if (mode === 'base' || mode === 'compare') {
       baseTrades = simulate(testM15, h1, h4, daily, rollingWindow, maxHoldBars, 'base');
     }
     if (mode === 'quality' || mode === 'compare') {
       qualityTrades = simulate(testM15, h1, h4, daily, rollingWindow, maxHoldBars, 'quality');
     }
-    // The independent engine is the canonical architecture. In compare mode we
-    // also run it so diagnostics can prove that each strategy owns its position.
-    if (mode === 'independent' || mode === 'compare') {
-      independentTrades = simulateIndependent(testM15, h1, h4, daily, rollingWindow, maxHoldBars, 'quality');
-    }
 
     const baseSummary = summarize(baseTrades);
     const qualitySummary = summarize(qualityTrades);
-    const independentSummary = summarize(independentTrades);
-    const selectedTrades = mode === 'base' ? baseTrades : mode === 'quality' ? qualityTrades : independentTrades;
-    const selectedStats = mode === 'base' ? baseSummary : mode === 'quality' ? qualitySummary : independentSummary;
+    const selectedTrades = mode === 'base' ? baseTrades : qualityTrades;
+    const selectedStats = mode === 'base' ? baseSummary : qualitySummary;
 
     const comparison = {
       baseTrades: baseSummary.total,
@@ -570,12 +418,14 @@ router.get('/', async (req, res) => {
       ? (lastTime - firstTime) / (1000 * 60 * 60 * 24 * 30.4375)
       : 0;
 
-    const result = {
+    return res.json({
       ok: true,
       status: 'LIVE',
+      deploymentFingerprint: 'GH-BACKTEST-REPORT-V1-2026-09-19',
+      reportEndpoint: '/api/backtest/report',
       mode,
       architecture: 'INDEPENDENT_STRATEGIES',
-      disclaimer: 'بک‌تست روی داده تاریخی واقعی TwelveData اجرا شده است. هر استراتژی به‌صورت مستقل بررسی می‌شود و اجماع وزنی شرط ورود نیست. هر ۷ موتور می‌توانند مستقل Trigger ایجاد کنند و هم‌جهتی سایر موتورها فقط به‌عنوان Quality/Context استفاده می‌شود. FRED و News در تاریخ خنثی فرض شده‌اند؛ ورود روی Close کندل سیگنال انجام شده؛ Spread/Commission/Slippage مدل نشده‌اند؛ MFE/MAE فقط از کندل‌های بعد از ورود محاسبه می‌شوند.',
+      disclaimer: 'بک‌تست روی داده تاریخی واقعی TwelveData اجرا شده است. هر استراتژی به‌صورت مستقل بررسی می‌شود و اجماع وزنی شرط ورود نیست. در نسخه فعلی فقط Trend Following اجازه فعال‌کردن معامله را دارد و سایر استراتژی‌ها diagnostics هستند. FRED و News در تاریخ خنثی فرض شده‌اند؛ ورود روی Close کندل سیگنال انجام شده؛ Spread/Commission/Slippage مدل نشده‌اند؛ MFE/MAE فقط از کندل‌های بعد از ورود محاسبه می‌شوند.',
       period: {
         from: firstTime ? new Date(firstTime).toISOString() : null,
         to: lastTime ? new Date(lastTime).toISOString() : null,
@@ -594,7 +444,6 @@ router.get('/', async (req, res) => {
       stats: selectedStats,
       baseStats: baseSummary,
       qualityStats: qualitySummary,
-      independentStats: independentSummary,
       comparison,
       direction: groupBy(selectedTrades, t => t.dir),
       sessions: groupBy(selectedTrades, t => t.session || 'UNKNOWN'),
@@ -620,12 +469,10 @@ router.get('/', async (req, res) => {
         return '3+';
       }),
       strategyStats: strategyStats(selectedTrades),
-      triggerStats: strategyTriggerStats(selectedTrades),
       strategyCombinations: strategyCombinationStats(selectedTrades),
       consensusComposition: consensusCompositionStats(selectedTrades),
       trades: cleanTrades(selectedTrades),
       diagnostics: {
-        independentTradeCount: independentTrades.length,
         baseTradeCount: baseTrades.length,
         qualityTradeCount: qualityTrades.length,
         qualityRetention: comparison.retention,
@@ -635,50 +482,25 @@ router.get('/', async (req, res) => {
         testBars: testM15.length,
         strategyCount: 7,
         independentArchitecture: true,
-        independentBacktestMode: mode === 'independent' || mode === 'compare',
-        concurrentStrategyPositions: mode === 'independent' || mode === 'compare',
-        activeStrategyEngines: ['TREND_FOLLOWING', 'STRUCTURE', 'LIQUIDITY_SWEEP', 'MOMENTUM', 'FIBONACCI', 'RSI_DIVERGENCE', 'FUNDAMENTAL'],
-        diagnosticOnlyStrategies: [],
+        activeStrategyEngines: ['TREND_FOLLOWING'],
+        diagnosticOnlyStrategies: ['STRUCTURE', 'LIQUIDITY_SWEEP', 'MOMENTUM', 'FIBONACCI', 'RSI_DIVERGENCE', 'FUNDAMENTAL'],
         history
       }
-    };
-
-    // Compact report mode: keeps the same backtest calculation but exposes a small,
-    // stable JSON payload that can be opened directly from a URL without copying the
-    // full result. The full result remains the default for backward compatibility.
-    const reportMode = String(req.query.report || req.query.format || '').toLowerCase();
-    if (reportMode === 'summary' || reportMode === 'compact') {
-      const report = {
-        ok: result.ok,
-        status: result.status,
-        mode: result.mode,
-        architecture: result.architecture,
-        period: result.period,
-        parameters: result.parameters,
-        stats: result.stats,
-        baseStats: result.baseStats,
-        qualityStats: result.qualityStats,
-        independentStats: result.independentStats,
-        comparison: result.comparison,
-        direction: result.direction,
-        sessions: result.sessions,
-        confidence: result.confidence,
-        quality: result.quality,
-        rr: result.rr,
-        strategyStats: result.strategyStats,
-        triggerStats: result.triggerStats,
-        diagnostics: result.diagnostics,
-        trades: result.trades
-      };
-      res.set('Cache-Control', 'no-store');
-      return res.json(report);
-    }
-
-    return res.json(result);
+    });
   } catch (e) {
     console.error('[backtest]', e);
     return res.json({ status: 'UNAVAILABLE', error: 'backtest-exception: ' + e.message });
   }
+}
+
+// /api/backtest and /api/backtest/report intentionally share the exact same handler.
+// The report endpoint also exposes a deployment fingerprint so stale Render builds are easy to detect.
+router.get('/', runBacktest);
+router.get('/report', (req, res, next) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  return runBacktest(req, res, next);
 });
 
 module.exports = router;
