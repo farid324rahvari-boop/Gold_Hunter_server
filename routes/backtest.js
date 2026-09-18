@@ -465,6 +465,18 @@ function cleanTrades(trades) {
   }));
 }
 
+router.get('/report', (req, res) => {
+  const q = new URLSearchParams({
+    mode: String(req.query.mode || 'independent'),
+    bars: String(req.query.bars || '10000'),
+    report: 'summary'
+  });
+  if (req.query.months != null) q.set('months', String(req.query.months));
+  if (req.query.rollingWindow != null) q.set('rollingWindow', String(req.query.rollingWindow));
+  if (req.query.maxHoldDays != null) q.set('maxHoldDays', String(req.query.maxHoldDays));
+  res.redirect('./?' + q.toString());
+});
+
 router.get('/', async (req, res) => {
   if (!process.env.TWELVEDATA_API_KEY) {
     return res.json({ status: 'UNAVAILABLE', error: 'no-api-key-configured' });
@@ -558,7 +570,7 @@ router.get('/', async (req, res) => {
       ? (lastTime - firstTime) / (1000 * 60 * 60 * 24 * 30.4375)
       : 0;
 
-    return res.json({
+    const result = {
       ok: true,
       status: 'LIVE',
       mode,
@@ -629,7 +641,40 @@ router.get('/', async (req, res) => {
         diagnosticOnlyStrategies: [],
         history
       }
-    });
+    };
+
+    // Compact report mode: keeps the same backtest calculation but exposes a small,
+    // stable JSON payload that can be opened directly from a URL without copying the
+    // full result. The full result remains the default for backward compatibility.
+    const reportMode = String(req.query.report || req.query.format || '').toLowerCase();
+    if (reportMode === 'summary' || reportMode === 'compact') {
+      const report = {
+        ok: result.ok,
+        status: result.status,
+        mode: result.mode,
+        architecture: result.architecture,
+        period: result.period,
+        parameters: result.parameters,
+        stats: result.stats,
+        baseStats: result.baseStats,
+        qualityStats: result.qualityStats,
+        independentStats: result.independentStats,
+        comparison: result.comparison,
+        direction: result.direction,
+        sessions: result.sessions,
+        confidence: result.confidence,
+        quality: result.quality,
+        rr: result.rr,
+        strategyStats: result.strategyStats,
+        triggerStats: result.triggerStats,
+        diagnostics: result.diagnostics,
+        trades: result.trades
+      };
+      res.set('Cache-Control', 'no-store');
+      return res.json(report);
+    }
+
+    return res.json(result);
   } catch (e) {
     console.error('[backtest]', e);
     return res.json({ status: 'UNAVAILABLE', error: 'backtest-exception: ' + e.message });
