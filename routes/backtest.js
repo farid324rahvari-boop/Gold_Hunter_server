@@ -1,9 +1,9 @@
 // Gold Hunter — Historical Backtest
 // Independent-strategy architecture:
-// - No weighted consensus is used to activate a trade.
+// - No weighted consensus is used; however, at least two independent directional trigger engines must agree.
 // - Base = independent strategy trigger without the Quality layer.
 // - Quality = same independent trigger + Quality layer.
-// - Independent engines may trigger; Fibonacci/RSI Divergence are context/setup only.
+// - Independent engines remain separate; Fibonacci/RSI Divergence are context/setup only and cannot count as trigger confirmations.
 // - Historical pagination diagnostics are preserved explicitly.
 // - Entry is simulated at the signal candle Close.
 // - FRED/News are neutral in historical mode.
