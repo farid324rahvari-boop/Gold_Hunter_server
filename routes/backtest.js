@@ -3,8 +3,8 @@
 // - No weighted consensus is used to activate a trade.
 // - Base = independent strategy trigger without the Quality layer.
 // - Quality = same independent trigger + Quality layer.
-// - At the moment Trend Following is the first strategy allowed to trigger;
-//   the other strategies remain diagnostics until their independent engines exist.
+// - All implemented independent engines may trigger; the first ACTIVE engine
+//   in the deterministic strategy order is selected for a single position.
 // - Historical pagination diagnostics are preserved explicitly.
 // - Entry is simulated at the signal candle Close.
 // - FRED/News are neutral in historical mode.
@@ -425,7 +425,8 @@ async function runBacktest(req, res) {
       reportEndpoint: '/api/backtest/report',
       mode,
       architecture: 'INDEPENDENT_STRATEGIES',
-      disclaimer: 'بک‌تست روی داده تاریخی واقعی TwelveData اجرا شده است. هر استراتژی به‌صورت مستقل بررسی می‌شود و اجماع وزنی شرط ورود نیست. در نسخه فعلی فقط Trend Following اجازه فعال‌کردن معامله را دارد و سایر استراتژی‌ها diagnostics هستند. FRED و News در تاریخ خنثی فرض شده‌اند؛ ورود روی Close کندل سیگنال انجام شده؛ Spread/Commission/Slippage مدل نشده‌اند؛ MFE/MAE فقط از کندل‌های بعد از ورود محاسبه می‌شوند.',
+      backtestVersion: 'GH-CURRENT-MAIN-AUDIT-2026-09-19',
+      disclaimer: 'بک‌تست روی داده تاریخی واقعی TwelveData اجرا شده است. هر استراتژی به‌صورت مستقل بررسی می‌شود و اجماع وزنی شرط ورود نیست. تمام موتورهای مستقلِ پیاده‌سازی‌شده می‌توانند Trigger شوند؛ برای جلوگیری از هم‌زمانی چند پوزیشن، در هر لحظه اولین موتور ACTIVE طبق ترتیب ثابت استراتژی‌ها انتخاب می‌شود. FRED و News در تاریخ خنثی فرض شده‌اند؛ ورود روی Close کندل سیگنال انجام شده؛ Spread/Commission/Slippage مدل نشده‌اند؛ MFE/MAE فقط از کندل‌های بعد از ورود محاسبه می‌شوند.',
       period: {
         from: firstTime ? new Date(firstTime).toISOString() : null,
         to: lastTime ? new Date(lastTime).toISOString() : null,
@@ -482,8 +483,9 @@ async function runBacktest(req, res) {
         testBars: testM15.length,
         strategyCount: 7,
         independentArchitecture: true,
-        activeStrategyEngines: ['TREND_FOLLOWING'],
-        diagnosticOnlyStrategies: ['STRUCTURE', 'LIQUIDITY_SWEEP', 'MOMENTUM', 'FIBONACCI', 'RSI_DIVERGENCE', 'FUNDAMENTAL'],
+        activeStrategyEngines: [...new Set(qualityTrades.concat(baseTrades).map(t => t.strategyId).filter(Boolean))],
+        allEnginesCanTrigger: true,
+        diagnosticOnlyStrategies: [],
         history
       }
     });
