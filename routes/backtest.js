@@ -3,8 +3,7 @@
 // - No weighted consensus is used to activate a trade.
 // - Base = independent strategy trigger without the Quality layer.
 // - Quality = same independent trigger + Quality layer.
-// - All implemented independent engines may trigger; the first ACTIVE engine
-//   in the deterministic strategy order is selected for a single position.
+// - Independent engines may trigger; Fibonacci/RSI Divergence are context/setup only.
 // - Historical pagination diagnostics are preserved explicitly.
 // - Entry is simulated at the signal candle Close.
 // - FRED/News are neutral in historical mode.
@@ -421,12 +420,11 @@ async function runBacktest(req, res) {
     return res.json({
       ok: true,
       status: 'LIVE',
-      deploymentFingerprint: 'GH-BACKTEST-REPORT-V1-2026-09-19',
+      deploymentFingerprint: 'GH-BACKTEST-REPORT-V2-CONTROLLED-2026-09-19',
       reportEndpoint: '/api/backtest/report',
       mode,
       architecture: 'INDEPENDENT_STRATEGIES',
-      backtestVersion: 'GH-CURRENT-MAIN-AUDIT-2026-09-19',
-      disclaimer: 'بک‌تست روی داده تاریخی واقعی TwelveData اجرا شده است. هر استراتژی به‌صورت مستقل بررسی می‌شود و اجماع وزنی شرط ورود نیست. تمام موتورهای مستقلِ پیاده‌سازی‌شده می‌توانند Trigger شوند؛ برای جلوگیری از هم‌زمانی چند پوزیشن، در هر لحظه اولین موتور ACTIVE طبق ترتیب ثابت استراتژی‌ها انتخاب می‌شود. FRED و News در تاریخ خنثی فرض شده‌اند؛ ورود روی Close کندل سیگنال انجام شده؛ Spread/Commission/Slippage مدل نشده‌اند؛ MFE/MAE فقط از کندل‌های بعد از ورود محاسبه می‌شوند.',
+      disclaimer: 'بک‌تست روی داده تاریخی واقعی TwelveData اجرا شده است. معماری مستقل است و اجماع وزنی شرط ورود نیست. Quality فقط لایه ایمنی اجراست و Score آن به‌تنهایی معامله را حذف نمی‌کند. Trend SELL فیلتر متقارن‌نشده H1+RSI دارد. Fibonacci و RSI Divergence فقط Context/Setup هستند و Trigger مستقل نیستند. FRED و News در تاریخ خنثی فرض شده‌اند؛ ورود روی Close کندل سیگنال انجام شده؛ Spread/Commission/Slippage مدل نشده‌اند؛ MFE/MAE فقط از کندل‌های بعد از ورود محاسبه می‌شوند.',
       period: {
         from: firstTime ? new Date(firstTime).toISOString() : null,
         to: lastTime ? new Date(lastTime).toISOString() : null,
@@ -483,9 +481,10 @@ async function runBacktest(req, res) {
         testBars: testM15.length,
         strategyCount: 7,
         independentArchitecture: true,
-        activeStrategyEngines: [...new Set(qualityTrades.concat(baseTrades).map(t => t.strategyId).filter(Boolean))],
-        allEnginesCanTrigger: true,
-        diagnosticOnlyStrategies: [],
+        activeStrategyEngines: ['TREND_FOLLOWING', 'STRUCTURE', 'LIQUIDITY_SWEEP', 'MOMENTUM'],
+        contextOnlyStrategies: ['FIBONACCI', 'RSI_DIVERGENCE'],
+        diagnosticOnlyStrategies: ['FUNDAMENTAL'],
+        controlledChanges: ['Trend SELL: H1 alignment + RSI<=48', 'Quality: score no longer a hard gate', 'Fibonacci: context/setup only', 'RSI Divergence: context/setup only'],
         history
       }
     });
