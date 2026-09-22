@@ -1,9 +1,9 @@
 // Gold Hunter — Historical Backtest
 // Independent-strategy architecture:
-// - No weighted consensus is used; however, at least two independent directional trigger engines must agree.
+// - No weighted consensus is used to activate a trade.
 // - Base = independent strategy trigger without the Quality layer.
 // - Quality = same independent trigger + Quality layer.
-// - Independent engines remain separate; Fibonacci/RSI Divergence are context/setup only and cannot count as trigger confirmations.
+// - All implemented strategy engines can independently trigger; no consensus is required.
 // - Historical pagination diagnostics are preserved explicitly.
 // - Entry is simulated at the signal candle Close.
 // - FRED/News are neutral in historical mode.
@@ -52,6 +52,97 @@ function updateMFE(position, bar) {
     : (position.entry - bar.high) / position.riskDist;
   position.mfe = Math.max(position.mfe || 0, mfe);
   position.mae = Math.min(position.mae || 0, mae);
+}
+
+function simulateIndependent(m15, h1, h4, daily, rollingWindow, maxHoldBars, mode) {
+  let h1Ptr = 0, h4Ptr = 0, dPtr = 0;
+  const positions = new Map();
+  const trades = [];
+  const startIdx = Math.max(rollingWindow, 100);
+  const applyQuality = mode === 'quality';
+
+  function closePosition(id, position, bar, result, r) {
+    const exit = result === 'LOSS' ? position.sl : (result === 'WIN' ? position.tp1 : bar.close);
+    trades.push({ ...position, exit, exitTime: bar.time, result, r: fmtR(r) });
+    positions.delete(id);
+  }
+
+  for (let i = startIdx; i < m15.length; i++) {
+    const bar = m15[i];
+    h1Ptr = advancePointer(h1, h1Ptr, bar.time);
+    h4Ptr = advancePointer(h4, h4Ptr, bar.time);
+    dPtr = advancePointer(daily, dPtr, bar.time);
+    if (h1Ptr < 30 || h4Ptr < 30 || dPtr < 20) continue;
+
+    // Manage each strategy's own position independently.
+    for (const [id, position] of Array.from(positions.entries())) {
+      updateMFE(position, bar);
+      const age = i - position.openIndex;
+      const hitSL = position.dir === 'BUY' ? bar.low <= position.sl : bar.high >= position.sl;
+      const hitTP = position.dir === 'BUY' ? bar.high >= position.tp1 : bar.low <= position.tp1;
+      if (hitSL) { closePosition(id, position, bar, 'LOSS', -1); continue; }
+      if (hitTP) {
+        const reward = Math.abs(position.tp1 - position.entry);
+        closePosition(id, position, bar, 'WIN', position.riskDist > 0 ? reward / position.riskDist : 0);
+        continue;
+      }
+      if (age >= maxHoldBars) {
+        const pl = position.dir === 'BUY' ? bar.close - position.entry : position.entry - bar.close;
+        const r = position.riskDist > 0 ? pl / position.riskDist : 0;
+        closePosition(id, position, bar, r >= 0 ? 'TIMEOUT_WIN' : 'TIMEOUT_LOSS', r);
+      }
+    }
+
+    const m15Window = m15.slice(Math.max(0, i - rollingWindow + 1), i + 1);
+    const h1Window = h1.slice(Math.max(0, h1Ptr - rollingWindow + 1), h1Ptr + 1);
+    const h4Window = h4.slice(Math.max(0, h4Ptr - rollingWindow + 1), h4Ptr + 1);
+    const dWindow = daily.slice(Math.max(0, dPtr - rollingWindow + 1), dPtr + 1);
+    if (h1Window.length < 30 || h4Window.length < 30 || dWindow.length < 20) continue;
+
+    let data, result;
+    try {
+      data = { m15: engine.analyze(m15Window), h1: engine.analyze(h1Window), h4: engine.analyze(h4Window), daily: engine.analyze(dWindow) };
+      result = engine.getIndependentSignals(data, engine.neutralFundamental(), engine.neutralNewsRisk());
+    } catch (_) { continue; }
+
+    for (const signal of result.active || []) {
+      const id = signal.strategyId;
+      if (!id || positions.has(id)) continue;
+      const confidence = Number(signal.confidence || 0);
+      const rr = Number(signal.rr || 0);
+      if (applyQuality) {
+        const quality = typeof engine.evaluateIndependentQuality === 'function'
+          ? engine.evaluateIndependentQuality(signal, data, result)
+          : { tradable: confidence >= engine.MIN_CONFIDENCE && rr >= engine.MIN_RR, score: confidence, grade: 'LEGACY' };
+        if (!quality.tradable) continue;
+        signal._quality = quality;
+      }
+      if (!['BUY','SELL'].includes(signal.direction)) continue;
+      const entry = bar.close;
+      const sl = Number(signal.stopLoss);
+      const tp1 = Number(signal.targets?.[0]);
+      const riskDist = Math.abs(entry - sl);
+      if (!Number.isFinite(riskDist) || riskDist <= 0 || !Number.isFinite(tp1)) continue;
+      const votes = {};
+      for (const s of (result.strategies || [])) if (s?.strategyId) votes[s.strategyId] = s.vote || s.direction || 'NEUTRAL';
+      positions.set(id, {
+        dir: signal.direction, entry, sl, tp1, openIndex: i, openTime: bar.time,
+        confidence, agreeCount: (result.active || []).length, totalCount: 7,
+        qualityScore: signal._quality?.score ?? confidence, qualityGrade: signal._quality?.grade || (confidence >= 85 ? 'EXCELLENT' : confidence >= 75 ? 'GOOD' : confidence >= 65 ? 'FAIR' : 'POOR'),
+        session: engine.getSession(bar.time), rr, strategyVotes: votes, strategyKey: id, strategyId: id,
+        strategyStatus: signal.status, strategyName: signal.name, mfe: 0, mae: 0, riskDist
+      });
+    }
+  }
+
+  for (const [id, position] of positions) {
+    const lastBar = m15[m15.length - 1];
+    updateMFE(position, lastBar);
+    const pl = position.dir === 'BUY' ? lastBar.close - position.entry : position.entry - lastBar.close;
+    const r = position.riskDist > 0 ? pl / position.riskDist : 0;
+    trades.push({ ...position, exit: lastBar.close, exitTime: lastBar.time, result: r >= 0 ? 'OPEN_WIN' : 'OPEN_LOSS', r: fmtR(r) });
+  }
+  return trades;
 }
 
 function simulate(m15, h1, h4, daily, rollingWindow, maxHoldBars, mode) {
@@ -277,6 +368,20 @@ function strategyStats(trades) {
   return result;
 }
 
+function strategyTriggerStats(trades) {
+  const result = {};
+  for (const name of STRATEGY_NAMES) {
+    const idMap = {
+      'روند چندتایم‌فریمی':'TREND_FOLLOWING', 'ساختار بازار (BOS/CHoCH)':'STRUCTURE',
+      'Liquidity Sweep (SMC)':'LIQUIDITY_SWEEP', 'مومنتوم (RSI + EMA20)':'MOMENTUM',
+      'Fibonacci Retracement':'FIBONACCI', 'واگرایی RSI':'RSI_DIVERGENCE', 'فاندامنتال (FRED)':'FUNDAMENTAL'
+    };
+    const items = trades.filter(t => t.strategyId === idMap[name]);
+    result[name] = summarize(items);
+  }
+  return result;
+}
+
 function strategyCombinationStats(trades) {
   const groups = {};
   for (const t of trades) {
@@ -331,7 +436,7 @@ function cleanTrades(trades) {
   }));
 }
 
-async function runBacktest(req, res) {
+router.get('/', async (req, res) => {
   if (!process.env.TWELVEDATA_API_KEY) {
     return res.json({ status: 'UNAVAILABLE', error: 'no-api-key-configured' });
   }
@@ -341,7 +446,7 @@ async function runBacktest(req, res) {
   const rollingWindow = Math.max(100, Math.min(Number(req.query.rollingWindow) || 220, 500));
   const maxHoldDays = Math.max(1, Math.min(Number(req.query.maxHoldDays) || 3, 10));
   const maxHoldBars = maxHoldDays * 24 * 4;
-  const mode = ['base', 'quality', 'compare'].includes(String(req.query.mode || 'compare').toLowerCase())
+  const mode = ['base', 'quality', 'compare', 'independent'].includes(String(req.query.mode || 'compare').toLowerCase())
     ? String(req.query.mode || 'compare').toLowerCase()
     : 'compare';
 
@@ -384,17 +489,24 @@ async function runBacktest(req, res) {
 
     let baseTrades = [];
     let qualityTrades = [];
+    let independentTrades = [];
     if (mode === 'base' || mode === 'compare') {
       baseTrades = simulate(testM15, h1, h4, daily, rollingWindow, maxHoldBars, 'base');
     }
     if (mode === 'quality' || mode === 'compare') {
       qualityTrades = simulate(testM15, h1, h4, daily, rollingWindow, maxHoldBars, 'quality');
     }
+    // The independent engine is the canonical architecture. In compare mode we
+    // also run it so diagnostics can prove that each strategy owns its position.
+    if (mode === 'independent' || mode === 'compare') {
+      independentTrades = simulateIndependent(testM15, h1, h4, daily, rollingWindow, maxHoldBars, 'quality');
+    }
 
     const baseSummary = summarize(baseTrades);
     const qualitySummary = summarize(qualityTrades);
-    const selectedTrades = mode === 'base' ? baseTrades : qualityTrades;
-    const selectedStats = mode === 'base' ? baseSummary : qualitySummary;
+    const independentSummary = summarize(independentTrades);
+    const selectedTrades = mode === 'base' ? baseTrades : mode === 'quality' ? qualityTrades : independentTrades;
+    const selectedStats = mode === 'base' ? baseSummary : mode === 'quality' ? qualitySummary : independentSummary;
 
     const comparison = {
       baseTrades: baseSummary.total,
@@ -420,11 +532,9 @@ async function runBacktest(req, res) {
     return res.json({
       ok: true,
       status: 'LIVE',
-      deploymentFingerprint: 'GH-BACKTEST-REPORT-V2-CONTROLLED-2026-09-19',
-      reportEndpoint: '/api/backtest/report',
       mode,
       architecture: 'INDEPENDENT_STRATEGIES',
-      disclaimer: 'بک‌تست روی داده تاریخی واقعی TwelveData اجرا شده است. معماری مستقل است و اجماع وزنی شرط ورود نیست. Quality فقط لایه ایمنی اجراست و Score آن به‌تنهایی معامله را حذف نمی‌کند. Trend SELL فیلتر متقارن‌نشده H1+RSI دارد. Fibonacci و RSI Divergence فقط Context/Setup هستند و Trigger مستقل نیستند. FRED و News در تاریخ خنثی فرض شده‌اند؛ ورود روی Close کندل سیگنال انجام شده؛ Spread/Commission/Slippage مدل نشده‌اند؛ MFE/MAE فقط از کندل‌های بعد از ورود محاسبه می‌شوند.',
+      disclaimer: 'بک‌تست روی داده تاریخی واقعی TwelveData اجرا شده است. هر استراتژی به‌صورت مستقل بررسی می‌شود و اجماع وزنی شرط ورود نیست. هر ۷ موتور می‌توانند مستقل Trigger ایجاد کنند و هم‌جهتی سایر موتورها فقط به‌عنوان Quality/Context استفاده می‌شود. FRED و News در تاریخ خنثی فرض شده‌اند؛ ورود روی Close کندل سیگنال انجام شده؛ Spread/Commission/Slippage مدل نشده‌اند؛ MFE/MAE فقط از کندل‌های بعد از ورود محاسبه می‌شوند.',
       period: {
         from: firstTime ? new Date(firstTime).toISOString() : null,
         to: lastTime ? new Date(lastTime).toISOString() : null,
@@ -443,6 +553,7 @@ async function runBacktest(req, res) {
       stats: selectedStats,
       baseStats: baseSummary,
       qualityStats: qualitySummary,
+      independentStats: independentSummary,
       comparison,
       direction: groupBy(selectedTrades, t => t.dir),
       sessions: groupBy(selectedTrades, t => t.session || 'UNKNOWN'),
@@ -468,10 +579,12 @@ async function runBacktest(req, res) {
         return '3+';
       }),
       strategyStats: strategyStats(selectedTrades),
+      triggerStats: strategyTriggerStats(selectedTrades),
       strategyCombinations: strategyCombinationStats(selectedTrades),
       consensusComposition: consensusCompositionStats(selectedTrades),
       trades: cleanTrades(selectedTrades),
       diagnostics: {
+        independentTradeCount: independentTrades.length,
         baseTradeCount: baseTrades.length,
         qualityTradeCount: qualityTrades.length,
         qualityRetention: comparison.retention,
@@ -481,10 +594,10 @@ async function runBacktest(req, res) {
         testBars: testM15.length,
         strategyCount: 7,
         independentArchitecture: true,
-        activeStrategyEngines: ['TREND_FOLLOWING', 'STRUCTURE', 'LIQUIDITY_SWEEP', 'MOMENTUM'],
-        contextOnlyStrategies: ['FIBONACCI', 'RSI_DIVERGENCE'],
-        diagnosticOnlyStrategies: ['FUNDAMENTAL'],
-        controlledChanges: ['Trend SELL: H1 alignment + RSI<=48', 'Quality: score no longer a hard gate', 'Fibonacci: context/setup only', 'RSI Divergence: context/setup only'],
+        independentBacktestMode: mode === 'independent' || mode === 'compare',
+        concurrentStrategyPositions: mode === 'independent' || mode === 'compare',
+        activeStrategyEngines: ['TREND_FOLLOWING', 'STRUCTURE', 'LIQUIDITY_SWEEP', 'MOMENTUM', 'FIBONACCI', 'RSI_DIVERGENCE', 'FUNDAMENTAL'],
+        diagnosticOnlyStrategies: [],
         history
       }
     });
@@ -492,16 +605,6 @@ async function runBacktest(req, res) {
     console.error('[backtest]', e);
     return res.json({ status: 'UNAVAILABLE', error: 'backtest-exception: ' + e.message });
   }
-}
-
-// /api/backtest and /api/backtest/report intentionally share the exact same handler.
-// The report endpoint also exposes a deployment fingerprint so stale Render builds are easy to detect.
-router.get('/', runBacktest);
-router.get('/report', (req, res, next) => {
-  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-  res.set('Pragma', 'no-cache');
-  res.set('Expires', '0');
-  return runBacktest(req, res, next);
 });
 
 module.exports = router;
