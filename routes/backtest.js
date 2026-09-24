@@ -24,6 +24,19 @@ const STRATEGY_NAMES = [
   'فاندامنتال (FRED)'
 ];
 
+// strategyVotes is always keyed by the engine's English strategyId (see
+// simulateIndependent / simulate below), never by the Persian display name.
+// Any lookup against strategyVotes must go through this map.
+const STRATEGY_NAME_TO_ID = {
+  'روند چندتایم‌فریمی': 'TREND_FOLLOWING',
+  'ساختار بازار (BOS/CHoCH)': 'STRUCTURE',
+  'Liquidity Sweep (SMC)': 'LIQUIDITY_SWEEP',
+  'مومنتوم (RSI + EMA20)': 'MOMENTUM',
+  'Fibonacci Retracement': 'FIBONACCI',
+  'واگرایی RSI': 'RSI_DIVERGENCE',
+  'فاندامنتال (FRED)': 'FUNDAMENTAL'
+};
+
 function fmtR(x) { return Number(Number(x).toFixed(3)); }
 
 function advancePointer(bars, ptr, targetTime) {
@@ -354,9 +367,10 @@ function groupBy(trades, fn) {
 function strategyStats(trades) {
   const result = {};
   for (const name of STRATEGY_NAMES) {
+    const id = STRATEGY_NAME_TO_ID[name];
     const buckets = { BUY: [], SELL: [], NEUTRAL: [] };
     for (const t of trades) {
-      const vote = t.strategyVotes?.[name] || 'NEUTRAL';
+      const vote = t.strategyVotes?.[id] || 'NEUTRAL';
       if (buckets[vote]) buckets[vote].push(t);
     }
     result[name] = {
@@ -371,12 +385,7 @@ function strategyStats(trades) {
 function strategyTriggerStats(trades) {
   const result = {};
   for (const name of STRATEGY_NAMES) {
-    const idMap = {
-      'روند چندتایم‌فریمی':'TREND_FOLLOWING', 'ساختار بازار (BOS/CHoCH)':'STRUCTURE',
-      'Liquidity Sweep (SMC)':'LIQUIDITY_SWEEP', 'مومنتوم (RSI + EMA20)':'MOMENTUM',
-      'Fibonacci Retracement':'FIBONACCI', 'واگرایی RSI':'RSI_DIVERGENCE', 'فاندامنتال (FRED)':'FUNDAMENTAL'
-    };
-    const items = trades.filter(t => t.strategyId === idMap[name]);
+    const items = trades.filter(t => t.strategyId === STRATEGY_NAME_TO_ID[name]);
     result[name] = summarize(items);
   }
   return result;
@@ -385,7 +394,7 @@ function strategyTriggerStats(trades) {
 function strategyCombinationStats(trades) {
   const groups = {};
   for (const t of trades) {
-    const key = STRATEGY_NAMES.map(name => t.strategyVotes?.[name] || 'NEUTRAL').join(' + ');
+    const key = STRATEGY_NAMES.map(name => t.strategyVotes?.[STRATEGY_NAME_TO_ID[name]] || 'NEUTRAL').join(' + ');
     (groups[key] ||= []).push(t);
   }
   return Object.fromEntries(Object.entries(groups).map(([key, items]) => [key, {
