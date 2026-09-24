@@ -21,7 +21,8 @@ const STRATEGY_NAMES = [
   'مومنتوم (RSI + EMA20)',
   'Fibonacci Retracement',
   'واگرایی RSI',
-  'فاندامنتال (FRED)'
+  'فاندامنتال (FRED)',
+  'بریک‌اوت رنج سشن آسیا'
 ];
 
 // strategyVotes is always keyed by the engine's English strategyId (see
@@ -34,7 +35,8 @@ const STRATEGY_NAME_TO_ID = {
   'مومنتوم (RSI + EMA20)': 'MOMENTUM',
   'Fibonacci Retracement': 'FIBONACCI',
   'واگرایی RSI': 'RSI_DIVERGENCE',
-  'فاندامنتال (FRED)': 'FUNDAMENTAL'
+  'فاندامنتال (FRED)': 'FUNDAMENTAL',
+  'بریک‌اوت رنج سشن آسیا': 'SESSION_BREAKOUT'
 };
 
 function fmtR(x) { return Number(Number(x).toFixed(3)); }
@@ -140,7 +142,7 @@ function simulateIndependent(m15, h1, h4, daily, rollingWindow, maxHoldBars, mod
       for (const s of (result.strategies || [])) if (s?.strategyId) votes[s.strategyId] = s.vote || s.direction || 'NEUTRAL';
       positions.set(id, {
         dir: signal.direction, entry, sl, tp1, openIndex: i, openTime: bar.time,
-        confidence, agreeCount: (result.active || []).length, totalCount: 7,
+        confidence, agreeCount: (result.active || []).length, totalCount: 8,
         qualityScore: signal._quality?.score ?? confidence, qualityGrade: signal._quality?.grade || (confidence >= 85 ? 'EXCELLENT' : confidence >= 75 ? 'GOOD' : confidence >= 65 ? 'FAIR' : 'POOR'),
         session: engine.getSession(bar.time), rr, strategyVotes: votes, strategyKey: id, strategyId: id,
         strategyStatus: signal.status, strategyName: signal.name, mfe: 0, mae: 0, riskDist
@@ -601,11 +603,11 @@ router.get('/', async (req, res) => {
         historicalBarsReturned: m15.length,
         requestedHistoricalBars: fetchBars,
         testBars: testM15.length,
-        strategyCount: 7,
+        strategyCount: 8,
         independentArchitecture: true,
         independentBacktestMode: mode === 'independent' || mode === 'compare',
         concurrentStrategyPositions: mode === 'independent' || mode === 'compare',
-        activeStrategyEngines: ['TREND_FOLLOWING', 'STRUCTURE', 'LIQUIDITY_SWEEP', 'MOMENTUM', 'FIBONACCI', 'FUNDAMENTAL'],
+        activeStrategyEngines: ['TREND_FOLLOWING', 'STRUCTURE', 'LIQUIDITY_SWEEP', 'MOMENTUM', 'FIBONACCI', 'FUNDAMENTAL', 'SESSION_BREAKOUT'],
         diagnosticOnlyStrategies: ['RSI_DIVERGENCE'],
         history
       }
