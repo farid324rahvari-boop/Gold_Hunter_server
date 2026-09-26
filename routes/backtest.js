@@ -609,8 +609,8 @@ router.get('/', async (req, res) => {
         independentArchitecture: true,
         independentBacktestMode: mode === 'independent' || mode === 'compare',
         concurrentStrategyPositions: mode === 'independent' || mode === 'compare',
-        activeStrategyEngines: ['TREND_FOLLOWING', 'STRUCTURE', 'LIQUIDITY_SWEEP', 'MOMENTUM', 'FIBONACCI', 'FUNDAMENTAL', 'SESSION_BREAKOUT', 'VOLATILITY_SQUEEZE'],
-        diagnosticOnlyStrategies: ['RSI_DIVERGENCE'],
+        activeStrategyEngines: ['TREND_FOLLOWING', 'STRUCTURE', 'LIQUIDITY_SWEEP', 'MOMENTUM', 'FIBONACCI', 'FUNDAMENTAL', 'SESSION_BREAKOUT'],
+        diagnosticOnlyStrategies: ['RSI_DIVERGENCE', 'VOLATILITY_SQUEEZE'],
         history
       }
     });
