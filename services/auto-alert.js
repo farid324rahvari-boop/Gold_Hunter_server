@@ -64,8 +64,13 @@ async function checkAndAlert() {
     const s = payload.signal || {};
     if (!['BUY','SELL'].includes(s.decision)) return { ok: true, sent: false, decision: s.decision };
 
-    // یک هشدار فقط برای هر ترکیب جهت/ورود/SL/TP ارسال می‌شود؛ پس هر دقیقه اسپم نمی‌کند.
-    const key = [s.decision, s.entry?.low, s.entry?.high, s.stopLoss, ...(s.targets || [])].join('|');
+    // کلید بر اساس «جهت + متن تریگر» است، نه Entry/SL/TP خام — چون قیمت طلا هر دقیقه کمی
+    // جابه‌جا می‌شود و Entry/SL/TP هر بار دوباره محاسبه می‌شوند، حتی وقتی علت سیگنال (مثلاً
+    // «بایاس فاندامنتال نزولی») روزها بدون تغییر باقی مانده. اگر کلید بر پایه آن قیمت‌های
+    // دائم‌در‌حال‌تغییر باشد، cooldown عملاً هیچ‌وقت match نمی‌کند و همان سیگنال معنایی هر ساعت
+    // دوباره ارسال می‌شود (اسپم). با کلید بر پایه تریگر، فقط وقتی علتِ سیگنال واقعاً عوض شود
+    // (یا جهت برعکس شود) پیام تازه ارسال می‌شود.
+    const key = [s.decision, s.trade?.trigger || s.trigger].join('|');
     const cooldown = Number(process.env.AUTO_ALERT_COOLDOWN_MS || 3600000);
     const now = Date.now();
     if (key === lastKey && now - lastSentAt < cooldown) return { ok: true, sent: false, duplicate: true };
