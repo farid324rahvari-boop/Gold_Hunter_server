@@ -41,7 +41,10 @@ function formatSignal(payload) {
     `<b>امتیاز وزنی:</b> BUY ${esc(s.scores?.buy)} | SELL ${esc(s.scores?.sell)}`,
     s.blockers?.length ? `<b>موانع:</b> ${esc(s.blockers.join(' | '))}` : `موانع: ندارد`,
     ``,
-    `<b>زمان:</b> ${new Date(payload.fetchedAt || Date.now()).toLocaleString('fa-IR')}`,
+    // توجه: فقط دادن locale='fa-IR' کافی نیست — آن فقط شکل اعداد/تقویم را فارسی می‌کند،
+    // ولی ساعت را طبق منطقه‌زمانی سرور (روی Render معمولاً UTC) حساب می‌کند، نه ایران.
+    // باید timeZone را صریح مشخص کرد تا ساعت واقعی تهران نمایش داده شود.
+    `<b>زمان:</b> ${new Date(payload.fetchedAt || Date.now()).toLocaleString('fa-IR', { timeZone: 'Asia/Tehran' })}`,
     `<i>هشدار تحلیلی است؛ اجرای معامله خودکار انجام نمی‌شود.</i>`
   ].filter(Boolean).join('\n');
 }
