@@ -1,5 +1,6 @@
 const { sendTelegramMessage } = require('./telegram');
 const fetch = require('node-fetch');
+const { addSignal, checkOpenSignals } = require('../lib/signal-tracker');
 
 let timer = null;
 let running = false;
@@ -49,6 +50,34 @@ function formatSignal(payload) {
   ].filter(Boolean).join('\n');
 }
 
+// پیام کوتاه نتیجه‌ی یک سیگنال قبلی — وقتی قیمت به یکی از TP ها برسد یا SL بخورد فرستاده می‌شود.
+function formatResult(ev) {
+  const dirFa = ev.decision === 'BUY' ? 'خرید' : 'فروش';
+  const openTime = new Date(ev.openedAt).toLocaleString('fa-IR', { timeZone: 'Asia/Tehran' });
+  if (ev.event === 'SL') {
+    return [
+      `❌ <b>نتیجه سیگنال ${dirFa} (${openTime})</b>`,
+      `حد ضرر خورد: <b>${esc(ev.sl)}</b>`,
+      `Entry بود: ${esc(ev.entryLow)} – ${esc(ev.entryHigh)}`
+    ].join('\n');
+  }
+  const tpN = ev.event.replace('TP', '');
+  const final = ev.event === 'TP3' ? ' (هدف نهایی — سیگنال بسته شد)' : '';
+  return [
+    `✅ <b>نتیجه سیگنال ${dirFa} (${openTime})</b>`,
+    `${esc(ev.event)} خورد: <b>${esc(ev[`tp${tpN}`])}</b>${final}`,
+    `Entry بود: ${esc(ev.entryLow)} – ${esc(ev.entryHigh)}`
+  ].join('\n');
+}
+
+async function reportResolvedSignals(price) {
+  const events = checkOpenSignals(price);
+  for (const ev of events) {
+    await sendTelegramMessage(formatResult(ev)).catch(() => {});
+  }
+  return events.length;
+}
+
 async function fetchSignal() {
   const base = process.env.PUBLIC_BASE_URL || `http://127.0.0.1:${process.env.PORT || 8787}`;
   const r = await fetch(`${base.replace(/\/$/,'')}/api/signal`, { timeout: 15000 });
@@ -64,8 +93,15 @@ async function checkAndAlert() {
     if (process.env.AUTO_ALERT_ENABLED !== 'true') return { ok: true, enabled: false };
     const payload = await fetchSignal();
     if (payload.status !== 'LIVE') return { ok: false, error: payload.error || 'signal-unavailable' };
+
+    // صرف‌نظر از اینکه تصمیم فعلی BUY/SELL/WAIT باشد، همیشه با قیمت تازه چک می‌کنیم که آیا
+    // یکی از سیگنال‌های قبلیِ بازِ ذخیره‌شده به TP/SL رسیده — این مستقل از منطق ارسال سیگنال
+    // جدید زیر است.
+    const currentPrice = Number(payload.market?.price);
+    const resolvedCount = await reportResolvedSignals(currentPrice);
+
     const s = payload.signal || {};
-    if (!['BUY','SELL'].includes(s.decision)) return { ok: true, sent: false, decision: s.decision };
+    if (!['BUY','SELL'].includes(s.decision)) return { ok: true, sent: false, decision: s.decision, resolvedCount };
 
     // کلید بر اساس «جهت + متن تریگر» است، نه Entry/SL/TP خام — چون قیمت طلا هر دقیقه کمی
     // جابه‌جا می‌شود و Entry/SL/TP هر بار دوباره محاسبه می‌شوند، حتی وقتی علت سیگنال (مثلاً
@@ -76,10 +112,23 @@ async function checkAndAlert() {
     const key = [s.decision, s.trade?.trigger || s.trigger].join('|');
     const cooldown = Number(process.env.AUTO_ALERT_COOLDOWN_MS || 3600000);
     const now = Date.now();
-    if (key === lastKey && now - lastSentAt < cooldown) return { ok: true, sent: false, duplicate: true };
+    if (key === lastKey && now - lastSentAt < cooldown) return { ok: true, sent: false, duplicate: true, resolvedCount };
 
     const result = await sendTelegramMessage(formatSignal(payload));
-    if (result.ok) { lastKey = key; lastSentAt = now; return { ok: true, sent: true }; }
+    if (result.ok) {
+      lastKey = key; lastSentAt = now;
+      // سیگنال تازه‌ارسال‌شده را برای رهگیری TP/SL آینده ذخیره می‌کنیم.
+      const entry = s.trade?.entry || s.entry || {};
+      const t = s.trade?.targets || s.targets || [];
+      addSignal({
+        decision: s.decision,
+        entryLow: Number(entry.low), entryHigh: Number(entry.high),
+        sl: Number(s.trade?.stopLoss ?? s.stopLoss),
+        tp1: Number(t[0]), tp2: Number(t[1]), tp3: Number(t[2]),
+        trigger: s.trade?.trigger || s.trigger
+      });
+      return { ok: true, sent: true, resolvedCount };
+    }
     return { ok: false, error: result.error || 'telegram-send-failed' };
   } catch (e) {
     return { ok: false, error: e.message || 'auto-alert-error' };
