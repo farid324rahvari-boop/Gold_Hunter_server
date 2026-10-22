@@ -1,10 +1,10 @@
 const { sendTelegramMessage } = require('./telegram');
 const fetch = require('node-fetch');
-const { addSignal, checkOpenSignals } = require('../lib/signal-tracker');
+const { addSignal, checkOpenSignals, getActiveSignals, getLastClosedAt } = require('../lib/signal-tracker');
 
 let timer = null;
 let running = false;
-let lastKey = null;
+let lastSentDecision = null;
 let lastSentAt = 0;
 let lastCheck = null;
 
@@ -72,10 +72,12 @@ function formatResult(ev) {
 
 async function reportResolvedSignals(price) {
   const events = checkOpenSignals(price);
-  for (const ev of events) {
+  // فقط نتیجه‌ی TP/SL به تلگرام می‌رود؛ FILLED/MISSED/EXPIRED/TIMEOUT فقط داخلی‌اند.
+  const reportable = events.filter((ev) => ev.event === 'SL' || /^TP\d$/.test(ev.event));
+  for (const ev of reportable) {
     await sendTelegramMessage(formatResult(ev)).catch(() => {});
   }
-  return events.length;
+  return reportable.length;
 }
 
 async function fetchSignal() {
@@ -103,20 +105,23 @@ async function checkAndAlert() {
     const s = payload.signal || {};
     if (!['BUY','SELL'].includes(s.decision)) return { ok: true, sent: false, decision: s.decision, resolvedCount };
 
-    // کلید بر اساس «جهت + متن تریگر» است، نه Entry/SL/TP خام — چون قیمت طلا هر دقیقه کمی
-    // جابه‌جا می‌شود و Entry/SL/TP هر بار دوباره محاسبه می‌شوند، حتی وقتی علت سیگنال (مثلاً
-    // «بایاس فاندامنتال نزولی») روزها بدون تغییر باقی مانده. اگر کلید بر پایه آن قیمت‌های
-    // دائم‌در‌حال‌تغییر باشد، cooldown عملاً هیچ‌وقت match نمی‌کند و همان سیگنال معنایی هر ساعت
-    // دوباره ارسال می‌شود (اسپم). با کلید بر پایه تریگر، فقط وقتی علتِ سیگنال واقعاً عوض شود
-    // (یا جهت برعکس شود) پیام تازه ارسال می‌شود.
-    const key = [s.decision, s.trade?.trigger || s.trigger].join('|');
-    const cooldown = Number(process.env.AUTO_ALERT_COOLDOWN_MS || 3600000);
+    // گارد ارسال: به‌جای کلید «جهت + متن تریگر» (که هر تریگر را یک سطل جدا می‌کرد و باعث
+    // ارسال پشت‌سرهم چند سیگنال هم‌ناحیه می‌شد)، بر اساس وضعیت واقعی سیگنال‌های ردیابی‌شده تصمیم می‌گیریم:
+    //  1) تا وقتی سیگنال فعال (PENDING/OPEN) هست سیگنال تازه نمی‌رود (سقف: AUTO_ALERT_MAX_ACTIVE، پیش‌فرض ۱).
+    //  2) بعد از بسته‌شدن (SL/TP3) یک سیگنال هم‌جهت، تا AUTO_ALERT_AFTER_CLOSE_MS صبر می‌کنیم.
+    //  3) برعکس‌شدن جهت (BUY↔SELL) تا AUTO_ALERT_FLIP_MS بعد از آخرین ارسال مجاز نیست (هیسترزیس).
     const now = Date.now();
-    if (key === lastKey && now - lastSentAt < cooldown) return { ok: true, sent: false, duplicate: true, resolvedCount };
+    const maxActive = Number(process.env.AUTO_ALERT_MAX_ACTIVE || 1);
+    const afterCloseMs = Number(process.env.AUTO_ALERT_AFTER_CLOSE_MS || 1800000);
+    const flipMs = Number(process.env.AUTO_ALERT_FLIP_MS || 1800000);
+
+    if (getActiveSignals().length >= maxActive) return { ok: true, sent: false, blocked: 'active-signal', resolvedCount };
+    if (now - getLastClosedAt(s.decision) < afterCloseMs) return { ok: true, sent: false, blocked: 'after-close-cooldown', resolvedCount };
+    if (lastSentDecision && lastSentDecision !== s.decision && now - lastSentAt < flipMs) return { ok: true, sent: false, blocked: 'flip-hysteresis', resolvedCount };
 
     const result = await sendTelegramMessage(formatSignal(payload));
     if (result.ok) {
-      lastKey = key; lastSentAt = now;
+      lastSentDecision = s.decision; lastSentAt = now;
       // سیگنال تازه‌ارسال‌شده را برای رهگیری TP/SL آینده ذخیره می‌کنیم.
       const entry = s.trade?.entry || s.entry || {};
       const t = s.trade?.targets || s.targets || [];
@@ -125,7 +130,8 @@ async function checkAndAlert() {
         entryLow: Number(entry.low), entryHigh: Number(entry.high),
         sl: Number(s.trade?.stopLoss ?? s.stopLoss),
         tp1: Number(t[0]), tp2: Number(t[1]), tp3: Number(t[2]),
-        trigger: s.trade?.trigger || s.trigger
+        trigger: s.trade?.trigger || s.trigger,
+        price: currentPrice
       });
       return { ok: true, sent: true, resolvedCount };
     }
