@@ -1,6 +1,6 @@
 const { sendTelegramMessage } = require('./telegram');
 const fetch = require('node-fetch');
-const { addSignal, checkOpenSignals, getActiveSignals, getLastClosedAt } = require('../lib/signal-tracker');
+const { addSignal, checkOpenSignals, getBlockingSignals, getLastClosedAt } = require('../lib/signal-tracker');
 
 let timer = null;
 let running = false;
@@ -107,7 +107,8 @@ async function checkAndAlert() {
 
     // گارد ارسال: به‌جای کلید «جهت + متن تریگر» (که هر تریگر را یک سطل جدا می‌کرد و باعث
     // ارسال پشت‌سرهم چند سیگنال هم‌ناحیه می‌شد)، بر اساس وضعیت واقعی سیگنال‌های ردیابی‌شده تصمیم می‌گیریم:
-    //  1) تا وقتی سیگنال فعال (PENDING/OPEN) هست سیگنال تازه نمی‌رود (سقف: AUTO_ALERT_MAX_ACTIVE، پیش‌فرض ۱).
+    //  1) تا وقتی سیگنالِ باز (OPEN و هنوز بدون خوردن TP1) هست سیگنال تازه نمی‌رود (سقف: AUTO_ALERT_MAX_ACTIVE، پیش‌فرض ۱).
+    //     سیگنالِ در انتظار Entry (PENDING) و سیگنالی که TP1 را خورده مانع نیستند.
     //  2) بعد از بسته‌شدن (SL/TP3) یک سیگنال هم‌جهت، تا AUTO_ALERT_AFTER_CLOSE_MS صبر می‌کنیم.
     //  3) برعکس‌شدن جهت (BUY↔SELL) تا AUTO_ALERT_FLIP_MS بعد از آخرین ارسال مجاز نیست (هیسترزیس).
     const now = Date.now();
@@ -115,7 +116,7 @@ async function checkAndAlert() {
     const afterCloseMs = Number(process.env.AUTO_ALERT_AFTER_CLOSE_MS || 1800000);
     const flipMs = Number(process.env.AUTO_ALERT_FLIP_MS || 1800000);
 
-    if (getActiveSignals().length >= maxActive) return { ok: true, sent: false, blocked: 'active-signal', resolvedCount };
+    if (getBlockingSignals().length >= maxActive) return { ok: true, sent: false, blocked: 'active-signal', resolvedCount };
     if (now - getLastClosedAt(s.decision) < afterCloseMs) return { ok: true, sent: false, blocked: 'after-close-cooldown', resolvedCount };
     if (lastSentDecision && lastSentDecision !== s.decision && now - lastSentAt < flipMs) return { ok: true, sent: false, blocked: 'flip-hysteresis', resolvedCount };
 
